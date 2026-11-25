@@ -1,0 +1,8 @@
+/target/
+**/.env
+**/.env.*
+*.log
+*.pcap
+*.pcapng
+*.toml.bak
+/netmerge.local.toml
