@@ -6,6 +6,12 @@ Run Wi-Fi only, USB tether only, both interfaces with multiple independent flows
 
 Every run must have a known destination, explicit maximum transfer size and duration, cancellation, and cleanup. Do not run a generic speed test or infer single-flow bonding from concurrent flow distribution.
 
-## Validation on this host
+## Validation on this host — 2026-11-25
 
-The current adapter inventory has active Wi-Fi at index 8 and an Ethernet device with no usable default route; it does not contain an Android USB tether/Remote NDIS adapter. No controlled remote test endpoint was supplied in this closure request. Therefore physical Wi-Fi/USB egress capture, combined-path distribution, disconnect/reconnect, and CPU comparison were not run. Do not treat unit tests or interface table snapshots as live traffic validation.
+Windows detected the Android USB tether as `Ethernet 2`, index 4, GUID `0d93791b-0078-40cb-af59-2918eed88f56`, IPv4 `10.224.251.132/24`, gateway `10.224.251.118`. Wi-Fi was index 8, GUID `23f040a9-6336-45f6-99c5-d8229fe61c22`.
+
+A one-flow USB-only Pathweave run selected index 4, temporarily routed only `172.66.147.243/32` through the TUN, then requested `https://example.com/` with an 8 KiB range, 8 KiB/s cap, 12-second timeout, and 16 KiB response ceiling. It returned HTTP 206 with 577 bytes in 0.28 seconds. The temporary route and Pathweave TUN were removed, default routes were unchanged, and existing virtual adapters were unchanged. The result record is under `target/live-validation/`.
+
+Packet Monitor produced an ETL with zero packet records on both the generic NIC selection and the tether's resolved component ID 241. Therefore the HTTPS result verifies a successful one-interface Pathweave data-plane transfer over the selected USB-bound socket, but physical NIC egress was not independently proven by packet capture. The reusable test script now rejects a zero-packet capture instead of reporting a full pass.
+
+Direct interface-bound TCP handshakes to `172.66.147.243:443` and `1.1.1.1:443` succeeded from USB source `10.224.251.132`; the same probes timed out from Wi-Fi source `192.168.1.100`. A Pathweave Wi-Fi-only test, combined-interface distribution, USB interruption/reconnect, and CPU comparison remain unverified. No adapters or default routes were modified.
