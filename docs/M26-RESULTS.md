@@ -14,6 +14,8 @@
 ## Validation performed
 
 - Host tests cover adaptive stability/recovery, unknown capacity, TOML validation/migration, CLI-over-TOML precedence, throughput-history bounds, address/gateway refresh semantics, GUID/index reconciliation, atomic rate updates/rollback, UDP AQM, DRR, and TCP/UDP regressions.
+- `cargo test --workspace`: 50 engine tests and 4 client/server protocol tests passed. `cargo fmt --all -- --check`, Clippy with `-D warnings`, Windows-target check, and release build passed.
+- The bounded local protocol script passed 12 checks, including TCP download/upload/duplex/half-close, concurrent flows, pacing, byte caps, and authentication rejection.
 - `--telemetry-once` ran on this Windows host and returned populated Wi-Fi addresses and default gateway from the native IP Helper tables.
 - Current adapter inventory: Wi-Fi is active at index 8; no Android USB tether/Remote NDIS adapter is present. No controlled remote test endpoint was supplied, so physical Wi-Fi/USB egress, combined-path, interruption/reconnect, and CPU comparisons were not run.
 
