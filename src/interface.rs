@@ -15,6 +15,7 @@ struct InterfaceSlot {
     guid: String,
     luid: u64,
     index: u32,
+    alias: String,
     operational: bool,
     health: Mutex<InterfaceHealthState>,
 }
@@ -107,6 +108,7 @@ impl InterfacePool {
                         guid: normalize_guid(&identity.guid),
                         luid: identity.luid,
                         index: identity.index,
+                        alias: identity.alias,
                         operational: identity.operational,
                         health: Mutex::new(InterfaceHealthState {
                             status: if identity.operational {
@@ -222,6 +224,21 @@ impl InterfacePool {
             .map(|slot| slot.guid.clone())
     }
 
+    pub fn identity_for_index(&self, index: u32) -> Option<InterfaceIdentity> {
+        self.slots
+            .read()
+            .unwrap_or_else(|e| e.into_inner())
+            .iter()
+            .find(|slot| slot.index == index)
+            .map(|slot| InterfaceIdentity {
+                guid: slot.guid.clone(),
+                luid: slot.luid,
+                index: slot.index,
+                alias: slot.alias.clone(),
+                operational: slot.operational,
+            })
+    }
+
     pub fn configured_guids(&self) -> Vec<String> {
         self.slots
             .read()
@@ -262,6 +279,7 @@ impl InterfacePool {
             {
                 slot.index = current.index;
                 slot.luid = current.luid;
+                slot.alias = current.alias.clone();
                 let mut health = slot.health.lock().unwrap_or_else(|e| e.into_inner());
                 if !current.operational {
                     slot.operational = false;
@@ -309,6 +327,10 @@ fn normalize_guid(guid: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn interface_index_network_order(index: u32) -> [u8; 4] {
+    index.to_be_bytes()
+}
+
 fn is_interface_path_error(error: &io::Error) -> bool {
     matches!(
         error.kind(),
@@ -322,14 +344,154 @@ fn is_interface_path_error(error: &io::Error) -> bool {
 pub async fn connect_on_interface(
     destination: SocketAddr,
     interface_index: u32,
+    correlation_id: u64,
+    attempt_kind: &'static str,
+    connect_timeout: Duration,
 ) -> io::Result<TcpStream> {
+    let attempt_started = Instant::now();
+    tracing::info!(
+        correlation_id,
+        attempt_kind,
+        stage = "socket_create_started",
+        %destination,
+        interface_index,
+        "outbound TCP connection stage"
+    );
     let socket = if destination.is_ipv4() {
-        TcpSocket::new_v4()?
+        TcpSocket::new_v4().map_err(|error| {
+            tracing::error!(
+                correlation_id,
+                attempt_kind,
+                stage = "socket_create_failed",
+                %destination,
+                interface_index,
+                error_kind = ?error.kind(),
+                raw_os_error = error.raw_os_error(),
+                %error,
+                "outbound TCP connection stage"
+            );
+            error
+        })?
     } else {
-        TcpSocket::new_v6()?
+        TcpSocket::new_v6().map_err(|error| {
+            tracing::error!(
+                correlation_id,
+                attempt_kind,
+                stage = "socket_create_failed",
+                %destination,
+                interface_index,
+                error_kind = ?error.kind(),
+                raw_os_error = error.raw_os_error(),
+                %error,
+                "outbound TCP connection stage"
+            );
+            error
+        })?
     };
-    set_tcp_interface(&socket, destination, interface_index)?;
-    socket.connect(destination).await
+    let local_before_connect = socket.local_addr().ok();
+    tracing::info!(
+        correlation_id,
+        attempt_kind,
+        stage = "socket_created",
+        %destination,
+        interface_index,
+        local_before_connect = ?local_before_connect,
+        "outbound TCP connection stage"
+    );
+    tracing::info!(
+        correlation_id,
+        attempt_kind,
+        stage = "interface_bind_started",
+        %destination,
+        interface_index,
+        bind_option = if destination.is_ipv4() { "IP_UNICAST_IF" } else { "IPV6_UNICAST_IF" },
+        "outbound TCP connection stage"
+    );
+    set_tcp_interface(&socket, destination, interface_index).map_err(|error| {
+        tracing::error!(
+            correlation_id,
+            attempt_kind,
+            stage = "interface_bind_failed",
+            %destination,
+            interface_index,
+            error_kind = ?error.kind(),
+            raw_os_error = error.raw_os_error(),
+            %error,
+            "outbound TCP connection stage"
+        );
+        error
+    })?;
+    tracing::info!(
+        correlation_id,
+        attempt_kind,
+        stage = "interface_bind_succeeded",
+        %destination,
+        interface_index,
+        "outbound TCP connection stage"
+    );
+    tracing::info!(
+        correlation_id,
+        attempt_kind,
+        stage = "tcp_connect_started",
+        %destination,
+        interface_index,
+        source_address_selection = "Windows selects address for the bound interface",
+        local_before_connect = ?local_before_connect,
+        "outbound TCP connection stage"
+    );
+    match tokio::time::timeout(connect_timeout, socket.connect(destination)).await {
+        Ok(Ok(stream)) => {
+            tracing::info!(
+                correlation_id,
+                attempt_kind,
+                stage = "tcp_connect_succeeded",
+                %destination,
+                interface_index,
+                local_endpoint = ?stream.local_addr().ok(),
+                remote_endpoint = ?stream.peer_addr().ok(),
+                duration_ms = attempt_started.elapsed().as_millis() as u64,
+                "outbound TCP connection stage"
+            );
+            Ok(stream)
+        }
+        Ok(Err(error)) => {
+            tracing::error!(
+                correlation_id,
+                attempt_kind,
+                stage = "tcp_connect_failed",
+                %destination,
+                interface_index,
+                local_endpoint_before_connect = ?local_before_connect,
+                error_kind = ?error.kind(),
+                raw_os_error = error.raw_os_error(),
+                duration_ms = attempt_started.elapsed().as_millis() as u64,
+                %error,
+                "outbound TCP connection stage"
+            );
+            Err(error)
+        }
+        Err(_) => {
+            let elapsed_ms = attempt_started.elapsed().as_millis() as u64;
+            let error = io::Error::new(
+                io::ErrorKind::TimedOut,
+                format!("TCP connect timed out after {elapsed_ms} ms"),
+            );
+            tracing::error!(
+                correlation_id,
+                attempt_kind,
+                stage = "tcp_connect_timed_out",
+                %destination,
+                interface_index,
+                local_endpoint_before_connect = ?local_before_connect,
+                error_kind = ?error.kind(),
+                raw_os_error = error.raw_os_error(),
+                duration_ms = elapsed_ms,
+                %error,
+                "outbound TCP connection stage"
+            );
+            Err(error)
+        }
+    }
 }
 
 pub fn bind_udp_on_interface(
@@ -387,7 +549,7 @@ fn set_interface_raw(
         IP_UNICAST_IF, IPPROTO_IP, IPPROTO_IPV6, IPV6_UNICAST_IF, SOCKET_ERROR, setsockopt,
     };
 
-    let index = interface_index.to_be_bytes();
+    let index = interface_index_network_order(interface_index);
     let (level, option) = if destination.is_ipv4() {
         (IPPROTO_IP, IP_UNICAST_IF)
     } else {
@@ -438,7 +600,7 @@ fn set_udp_interface(
 mod tests {
     use std::{io, thread, time::Duration};
 
-    use super::{InterfaceHealth, InterfaceIdentity, InterfacePool};
+    use super::{InterfaceHealth, InterfaceIdentity, InterfacePool, interface_index_network_order};
 
     #[test]
     fn scheduler_rotates_and_skips_quarantined_interfaces() {
@@ -502,6 +664,10 @@ mod tests {
             Duration::from_secs(1),
         )
         .unwrap();
+        let initial = pool.identity_for_index(8).unwrap();
+        assert_eq!(initial.guid, "abcdef01-0000-0000-0000-000000000001");
+        assert_eq!(initial.luid, 10);
+        assert_eq!(initial.alias, "USB tether");
         pool.set_health(8, InterfaceHealth::Degraded);
         let changes = pool.reconcile(&[InterfaceIdentity {
             guid: "abcdef01-0000-0000-0000-000000000001".into(),
@@ -516,6 +682,19 @@ mod tests {
         assert_eq!(changes[0].previous_index, 8);
         assert_eq!(changes[0].current_index, Some(42));
         assert_eq!(changes[0].luid, Some(99));
+        let current = pool.identity_for_index(42).unwrap();
+        assert_eq!(current.guid, initial.guid);
+        assert_eq!(current.luid, 99);
+        assert_eq!(current.alias, "renamed adapter");
+    }
+
+    #[test]
+    fn windows_interface_index_option_uses_network_byte_order() {
+        assert_eq!(interface_index_network_order(8), [0, 0, 0, 8]);
+        assert_eq!(
+            interface_index_network_order(0x123456),
+            [0, 0x12, 0x34, 0x56]
+        );
     }
 
     #[test]

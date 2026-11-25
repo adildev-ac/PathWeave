@@ -21,6 +21,7 @@ pub struct EngineContext {
     pub qos: Arc<QosEngine>,
     pub flows: Arc<FlowManager>,
     pub tcp_slots: Arc<Semaphore>,
+    pub max_tcp_connections: usize,
     pub udp_slots: Arc<Semaphore>,
     pub connect_timeout: Duration,
     pub udp_idle_timeout: Duration,

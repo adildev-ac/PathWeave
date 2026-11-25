@@ -264,9 +264,17 @@ struct Args {
 
 #[tokio::main]
 async fn main() -> Result<()> {
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    let log_filter = tracing_subscriber::EnvFilter::from_default_env();
+    if std::env::var("PATHWEAVE_LOG_FORMAT").is_ok_and(|value| value.eq_ignore_ascii_case("json")) {
+        tracing_subscriber::fmt()
+            .json()
+            .flatten_event(true)
+            .with_ansi(false)
+            .with_env_filter(log_filter)
+            .init();
+    } else {
+        tracing_subscriber::fmt().with_env_filter(log_filter).init();
+    }
 
     let matches = Args::command().get_matches();
     let mut args = Args::from_arg_matches(&matches)?;
@@ -881,6 +889,7 @@ async fn main() -> Result<()> {
         qos: qos_engine.clone(),
         flows: flow_manager.clone(),
         tcp_slots: Arc::new(Semaphore::new(args.max_connections)),
+        max_tcp_connections: args.max_connections,
         udp_slots: Arc::new(Semaphore::new(args.max_udp_sessions)),
         connect_timeout: Duration::from_secs(args.connect_timeout_secs),
         udp_idle_timeout: Duration::from_secs(args.udp_idle_timeout_secs),

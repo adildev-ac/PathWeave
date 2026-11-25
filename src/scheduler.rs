@@ -587,14 +587,17 @@ pub fn start_probe_tasks(
                         continue;
                     };
                     let started = tokio::time::Instant::now();
-                    let result = tokio::time::timeout(
+                    let result = crate::interface::connect_on_interface(
+                        target,
+                        index,
+                        0,
+                        "probe",
                         timeout_duration,
-                        crate::interface::connect_on_interface(target, index),
                     )
                     .await;
                     match result {
-                        Ok(Ok(_stream)) => store.record_probe(index, Some(started.elapsed())),
-                        Ok(Err(_)) | Err(_) => store.record_probe(index, None),
+                        Ok(_stream) => store.record_probe(index, Some(started.elapsed())),
+                        Err(_) => store.record_probe(index, None),
                     }
                     tokio::time::sleep(interval).await;
                 }

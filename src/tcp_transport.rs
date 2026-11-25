@@ -1,7 +1,10 @@
-use std::sync::Arc;
+use std::sync::{
+    Arc,
+    atomic::{AtomicU64, Ordering},
+};
 
 use ipstack::IpStackTcpStream;
-use tokio::{task::JoinSet, time::timeout};
+use tokio::task::JoinSet;
 use tracing::{error, info, warn};
 
 use crate::{
@@ -12,6 +15,8 @@ use crate::{
     scheduler::FlowMetadata,
     transport::{EngineContext, TransportEngine, TransportProtocol},
 };
+
+static NEXT_TCP_CORRELATION_ID: AtomicU64 = AtomicU64::new(1);
 
 #[derive(Default)]
 pub struct TcpTransportEngine;
@@ -29,9 +34,10 @@ impl TransportEngine<IpStackTcpStream> for TcpTransportEngine {
     ) {
         let source = inbound.local_addr();
         let destination = inbound.peer_addr();
+        let correlation_id = NEXT_TCP_CORRELATION_ID.fetch_add(1, Ordering::Relaxed);
         let key = FlowKey::tcp(source, destination);
         let Some(permit) = context.acquire_tcp() else {
-            warn!(%source, %destination, "TCP flow rejected: relay capacity is full");
+            warn!(correlation_id, stage = "tcp_flow_rejected_capacity", %source, %destination, max_connections = context.max_tcp_connections, available_permits = context.tcp_slots.available_permits(), "TCP flow rejected: relay capacity is full");
             return;
         };
         let Some(decision) = context.scheduler.select(FlowMetadata::new(
@@ -39,17 +45,19 @@ impl TransportEngine<IpStackTcpStream> for TcpTransportEngine {
             source,
             destination,
         )) else {
-            warn!(%source, %destination, "TCP flow rejected: all configured interfaces are in health cooldown");
+            warn!(correlation_id, stage = "tcp_flow_rejected_scheduler", %source, %destination, "TCP flow rejected: all configured interfaces are in health cooldown");
             return;
         };
         let interface_index = decision.actual_interface;
         let flow = FlowRecord::new(key, interface_index);
+        let selected_identity = context.interfaces.identity_for_index(interface_index);
         let qos = context
             .qos
             .session(flow.id, interface_index, decision.traffic_class);
-        info!(flow_id = flow.id, scheduler_mode = ?decision.mode, actual_interface = decision.actual_interface, adaptive_recommendation = decision.recommended_interface, traffic_class = ?decision.traffic_class, fallback = decision.fallback, reason = %decision.reason, candidates = ?decision.candidates, "TCP scheduler decision");
+        info!(correlation_id, flow_id = flow.id, scheduler_mode = ?decision.mode, actual_interface = decision.actual_interface, adaptive_recommendation = decision.recommended_interface, traffic_class = ?decision.traffic_class, fallback = decision.fallback, reason = %decision.reason, candidates = ?decision.candidates, "TCP scheduler decision");
         info!(
             flow_id = flow.id,
+            correlation_id,
             %source,
             %destination,
             address_family = flow.key.address_family(),
@@ -58,10 +66,23 @@ impl TransportEngine<IpStackTcpStream> for TcpTransportEngine {
             created_at = ?flow.created_at,
             "TCP flow accepted"
         );
+        info!(
+            correlation_id,
+            stage = "tun_flow_accepted",
+            %source,
+            %destination,
+            scheduler_interface_index = interface_index,
+            interface_guid = selected_identity.as_ref().map(|identity| identity.guid.as_str()),
+            interface_luid = selected_identity.as_ref().map(|identity| identity.luid),
+            interface_alias = selected_identity.as_ref().map(|identity| identity.alias.as_str()),
+            interface_operational = selected_identity.as_ref().map(|identity| identity.operational),
+            "TCP connection lifecycle"
+        );
         tasks.spawn(run_tcp(
             inbound,
             context,
             flow,
+            correlation_id,
             permit,
             source,
             destination,
@@ -74,6 +95,7 @@ async fn run_tcp(
     inbound: IpStackTcpStream,
     context: Arc<EngineContext>,
     flow: Arc<FlowRecord>,
+    correlation_id: u64,
     _permit: tokio::sync::OwnedSemaphorePermit,
     source: std::net::SocketAddr,
     destination: std::net::SocketAddr,
@@ -81,32 +103,46 @@ async fn run_tcp(
 ) {
     let key = flow.key;
     if context.flows.insert(flow.clone()).await.is_err() {
-        warn!(flow_id = flow.id, %source, %destination, "TCP flow rejected: five-tuple is already active");
+        warn!(flow_id = flow.id, correlation_id, stage = "tcp_flow_rejected_duplicate", %source, %destination, "TCP flow rejected: five-tuple is already active");
         return;
     }
     flow.set_state(FlowState::Connecting);
-    let result = timeout(
+    info!(
+        correlation_id,
+        flow_id = flow.id,
+        stage = "interface_resolution",
+        %source,
+        %destination,
+        interface_index = flow.interface_index,
+        interface_guid = context.interfaces.guid_for_index(flow.interface_index),
+        interface_identity = ?context.interfaces.identity_for_index(flow.interface_index),
+        "TCP connection lifecycle"
+    );
+    let remote = match connect_on_interface(
+        destination,
+        flow.interface_index,
+        correlation_id,
+        "flow",
         context.connect_timeout,
-        connect_on_interface(destination, flow.interface_index),
     )
-    .await;
-    let remote = match result {
-        Ok(Ok(remote)) => {
+    .await
+    {
+        Ok(remote) => {
             context.interfaces.mark_healthy(flow.interface_index);
             remote
         }
-        Ok(Err(error)) => {
+        Err(error) if error.kind() != std::io::ErrorKind::TimedOut => {
             let quarantined = context
                 .interfaces
                 .report_path_error(flow.interface_index, &error);
             flow.set_state(FlowState::Failed);
-            error!(flow_id = flow.id, %source, %destination, interface_index = flow.interface_index, quarantined, %error, "interface-bound TCP connect failed");
+            error!(flow_id = flow.id, correlation_id, %source, %destination, interface_index = flow.interface_index, quarantined, error_kind = ?error.kind(), raw_os_error = error.raw_os_error(), duration_ms = flow.counters.duration().as_millis() as u64, %error, "interface-bound TCP connect failed");
             context.flows.remove(key, flow.id).await;
             return;
         }
-        Err(_) => {
+        Err(error) => {
             flow.set_state(FlowState::Failed);
-            error!(flow_id = flow.id, %source, %destination, interface_index = flow.interface_index, timeout_secs = context.connect_timeout.as_secs(), "interface-bound TCP connect timed out");
+            error!(flow_id = flow.id, correlation_id, %source, %destination, interface_index = flow.interface_index, timeout_secs = context.connect_timeout.as_secs(), error_kind = ?error.kind(), raw_os_error = error.raw_os_error(), %error, "interface-bound TCP connect timed out");
             context.flows.remove(key, flow.id).await;
             return;
         }
@@ -114,8 +150,19 @@ async fn run_tcp(
 
     let outbound_local = remote.local_addr().ok();
     let outbound_peer = remote.peer_addr().ok();
-    info!(flow_id = flow.id, %source, %destination, interface_index = flow.interface_index, outbound_local = ?outbound_local, outbound_peer = ?outbound_peer, "TCP flow connected and pinned");
+    info!(flow_id = flow.id, correlation_id, %source, %destination, interface_index = flow.interface_index, outbound_local = ?outbound_local, outbound_peer = ?outbound_peer, "TCP flow connected and pinned");
     flow.set_state(FlowState::Relaying);
+    info!(
+        correlation_id,
+        flow_id = flow.id,
+        stage = "tcp_relay_initialized",
+        %source,
+        %destination,
+        interface_index = flow.interface_index,
+        outbound_local = ?outbound_local,
+        outbound_peer = ?outbound_peer,
+        "TCP connection lifecycle"
+    );
     let relay_result = if context.qos.mode() == QosMode::Disabled {
         relay_bidirectional(inbound, remote, flow.counters.clone()).await
     } else {

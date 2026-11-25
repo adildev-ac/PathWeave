@@ -4,7 +4,9 @@ param(
     [Parameter(Mandatory)][string]$DestinationIPv4,
     [Parameter(Mandatory)][string]$HostName,
     [ValidateRange(1024, 16384)][int]$MaxResponseBytes = 16384,
-    [ValidateSet('PacketMonitor', 'NetshTrace')][string]$CaptureBackend = 'PacketMonitor'
+    [ValidateSet('PacketMonitor', 'NetshTrace')][string]$CaptureBackend = 'PacketMonitor',
+    [ValidateRange(1, 512)][int]$MaxConnections = 512,
+    [ValidateRange(1, 60)][int]$ConnectTimeoutSecs = 12
 )
 
 $ErrorActionPreference = 'Stop'
@@ -24,6 +26,46 @@ if ($LASTEXITCODE -ne 0) { throw 'Pathweave could not read the Windows interface
 $telemetry = ConvertFrom-Json -InputObject $telemetryJson
 $identity = $telemetry | Where-Object { $_.index -eq $InterfaceIndex } | Select-Object -First 1
 if (-not $identity -or $identity.stable_guid -ne $ExpectedGuid -or -not $identity.operational) { throw 'The selected index no longer resolves to the expected operational GUID.' }
+$adapterAddresses = @($identity.ipv4_addresses | ForEach-Object { ($_ -split '/')[0] } | Where-Object { $_ -notlike '169.254.*' })
+if ($adapterAddresses.Count -eq 0) { throw "The selected interface $InterfaceIndex has no usable IPv4 source address." }
+$selectedSourceIPv4 = $adapterAddresses[0]
+$routeBefore = Find-NetRoute -RemoteIPAddress $DestinationIPv4 -ErrorAction Stop | Select-Object InterfaceAlias,InterfaceIndex,NextHop,DestinationPrefix,RouteMetric
+
+$directSocketResult = $null
+$directSocket = [Net.Sockets.Socket]::new([Net.Sockets.AddressFamily]::InterNetwork, [Net.Sockets.SocketType]::Stream, [Net.Sockets.ProtocolType]::Tcp)
+$directWatch = [Diagnostics.Stopwatch]::StartNew()
+try {
+    $directSocket.Bind([Net.IPEndPoint]::new([Net.IPAddress]::Parse($selectedSourceIPv4), 0))
+    $directLocal = $directSocket.LocalEndPoint.ToString()
+    $directAsync = $directSocket.BeginConnect([Net.IPEndPoint]::new($remoteIp, 443), $null, $null)
+    if (-not $directAsync.AsyncWaitHandle.WaitOne([TimeSpan]::FromSeconds(5))) { throw [TimeoutException]::new('Direct Wi-Fi TCP connect exceeded 5000 ms.') }
+    $directSocket.EndConnect($directAsync)
+    $directWatch.Stop()
+    $directSocketResult = [pscustomobject]@{
+        bind_succeeded = $true
+        connect_succeeded = $true
+        local_endpoint = $directSocket.LocalEndPoint.ToString()
+        remote_endpoint = $directSocket.RemoteEndPoint.ToString()
+        interface_index = $InterfaceIndex
+        duration_ms = $directWatch.ElapsedMilliseconds
+        error = $null
+    }
+}
+catch {
+    $directWatch.Stop()
+    $directError = $_.Exception
+    while ($directError.InnerException) { $directError = $directError.InnerException }
+    $directSocketResult = [pscustomobject]@{
+        bind_succeeded = [bool]$directSocket.LocalEndPoint
+        connect_succeeded = $false
+        local_endpoint = if ($directSocket.LocalEndPoint) { $directSocket.LocalEndPoint.ToString() } else { $null }
+        remote_endpoint = "$DestinationIPv4`:443"
+        interface_index = $InterfaceIndex
+        duration_ms = $directWatch.ElapsedMilliseconds
+        error = [pscustomobject]@{ message = $directError.Message; type = $directError.GetType().FullName; socket_error = if ($directError -is [Net.Sockets.SocketException]) { $directError.SocketErrorCode.ToString() } else { $null }; native_error = if ($directError -is [Net.Sockets.SocketException]) { $directError.NativeErrorCode } else { $null } }
+    }
+}
+finally { $directSocket.Dispose() }
 
 if (Get-NetAdapter -Name 'Pathweave' -ErrorAction SilentlyContinue) { throw 'A Pathweave adapter already exists; refusing to reuse it.' }
 $prefix = "$DestinationIPv4/32"
@@ -57,11 +99,18 @@ $engineErr = Join-Path $target "pathweave-if$InterfaceIndex-$stamp-engine-error.
 $curlErrorPath = Join-Path $target "pathweave-if$InterfaceIndex-$stamp-curl-error.log"
 $resultPath = Join-Path $target "pathweave-if$InterfaceIndex-$stamp-result.json"
 $routeAdded = $false
+$routeDuring = @()
 $captureStarted = $false
 $engineProcess = $null
+$curlProcess = $null
+$previousPathweaveLogFormat = $env:PATHWEAVE_LOG_FORMAT
+$curlOutputPath = Join-Path $target "pathweave-if$InterfaceIndex-$stamp-curl-output.log"
 $routesBefore = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.InterfaceIndex)|$($_.NextHop)|$($_.RouteMetric)|$($_.PolicyStore)" } | Sort-Object)
 $virtualBefore = @(Get-NetAdapter -Name 'net-merge','utun8' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)|$($_.ifIndex)|$($_.Status)" } | Sort-Object)
 $curlResult = $null
+$curlExitCode = $null
+$pathweaveSocketSamples = New-Object System.Collections.Generic.List[object]
+$failureMessage = $null
 $componentId = $null
 $outboundLocal = $null
 $outboundPeer = $null
@@ -69,12 +118,17 @@ $captureStopError = $null
 
 try {
     $previousRustLog = $env:RUST_LOG
+    $previousPathweaveLogFormat = $env:PATHWEAVE_LOG_FORMAT
     try {
         $env:RUST_LOG = 'info'
+        $env:PATHWEAVE_LOG_FORMAT = 'json'
         $engineProcess = Start-Process -FilePath $engine -WorkingDirectory (Split-Path $engine -Parent) -WindowStyle Hidden -PassThru `
-            -RedirectStandardOutput $engineOut -RedirectStandardError $engineErr -ArgumentList @('--interface', "$InterfaceIndex")
+            -RedirectStandardOutput $engineOut -RedirectStandardError $engineErr -ArgumentList @('--interface', "$InterfaceIndex", '--max-connections', "$MaxConnections", '--connect-timeout-secs', "$ConnectTimeoutSecs")
     }
-    finally { $env:RUST_LOG = $previousRustLog }
+    finally {
+        $env:RUST_LOG = $previousRustLog
+        if ($null -eq $previousPathweaveLogFormat) { Remove-Item Env:PATHWEAVE_LOG_FORMAT -ErrorAction SilentlyContinue } else { $env:PATHWEAVE_LOG_FORMAT = $previousPathweaveLogFormat }
+    }
     $deadline = (Get-Date).AddSeconds(20)
     $tun = $null
     while ((Get-Date) -lt $deadline -and -not $tun) {
@@ -98,6 +152,7 @@ try {
 
     New-NetRoute -DestinationPrefix $prefix -InterfaceIndex $tun.ifIndex -NextHop '0.0.0.0' -PolicyStore ActiveStore | Out-Null
     $routeAdded = $true
+    $routeDuring = @(Get-NetRoute -DestinationPrefix $prefix -ErrorAction Stop | Select-Object InterfaceAlias,InterfaceIndex,NextHop,DestinationPrefix,RouteMetric)
     if ($CaptureBackend -eq 'PacketMonitor') {
         $captureOutput = @(& pktmon start --capture --comp $componentId --pkt-size 128 --file-name $etl --file-size 16 --log-mode circular 2>&1)
     }
@@ -112,15 +167,29 @@ try {
         throw 'netsh trace did not confirm an active packet-capture session.'
     }
 
-    $curlOutput = & curl.exe --noproxy '*' --silent --show-error --max-time 12 --connect-timeout 5 `
-        --max-filesize $MaxResponseBytes --limit-rate 8192 --range "0-$([Math]::Min(8191,$MaxResponseBytes - 1))" `
-        --resolve "$HostName`:443:$DestinationIPv4" --output NUL --write-out '%{http_code}|%{size_download}|%{remote_ip}|%{time_total}|%{local_ip}|%{local_port}|%{remote_port}' `
-        "https://$HostName/" 2> $curlErrorPath
-    $curlExit = $LASTEXITCODE
-    $curlResult = ($curlOutput | Out-String).Trim()
-    if ($curlExit -ne 0) {
+    $curlArguments = @('--noproxy','*','--silent','--show-error','--max-time','12','--connect-timeout','5',
+        '--max-filesize',"$MaxResponseBytes",'--limit-rate','8192','--range',"0-$([Math]::Min(8191,$MaxResponseBytes - 1))",
+        '--resolve',"$HostName`:443:$DestinationIPv4",'--output','NUL','--write-out','%{http_code}|%{size_download}|%{remote_ip}|%{time_total}|%{local_ip}|%{local_port}|%{remote_port}',
+        "https://$HostName/")
+    $curlProcess = Start-Process -FilePath 'curl.exe' -WindowStyle Hidden -PassThru -RedirectStandardOutput $curlOutputPath -RedirectStandardError $curlErrorPath -ArgumentList $curlArguments
+    while (-not $curlProcess.HasExited) {
+        $liveSockets = @(Get-NetTCPConnection -OwningProcess $engineProcess.Id -ErrorAction SilentlyContinue | Where-Object { $_.RemoteAddress -eq $DestinationIPv4 -and $_.RemotePort -eq 443 })
+        foreach ($socket in $liveSockets) {
+            $sampleKey = "$($socket.LocalAddress):$($socket.LocalPort)|$($socket.RemoteAddress):$($socket.RemotePort)|$($socket.State)"
+            if (-not ($pathweaveSocketSamples | Where-Object { $_.key -eq $sampleKey })) {
+                $localAddressOwner = Get-NetIPAddress -IPAddress $socket.LocalAddress -ErrorAction SilentlyContinue | Select-Object -First 1
+                $pathweaveSocketSamples.Add([pscustomobject]@{ key=$sampleKey; local_endpoint="$($socket.LocalAddress):$($socket.LocalPort)"; remote_endpoint="$($socket.RemoteAddress):$($socket.RemotePort)"; state=$socket.State.ToString(); local_address_interface_index=if($localAddressOwner){$localAddressOwner.InterfaceIndex}else{$null}; owning_process_id=$engineProcess.Id; observed_at=(Get-Date).ToString('o') })
+            }
+        }
+        Start-Sleep -Milliseconds 50
+    }
+    $curlProcess.WaitForExit()
+    $curlProcess.Refresh()
+    $curlExitCode = [int]$curlProcess.ExitCode
+    $curlResult = if (Test-Path -LiteralPath $curlOutputPath) { (Get-Content -LiteralPath $curlOutputPath -Raw).Trim() } else { '' }
+    if ($curlExitCode -ne 0) {
         $curlErrorText = if (Test-Path -LiteralPath $curlErrorPath) { (Get-Content -LiteralPath $curlErrorPath | Out-String).Trim() } else { $curlResult }
-        throw "Bounded HTTPS request failed with curl exit ${curlExit}: $curlErrorText"
+        throw "Bounded HTTPS request failed with curl exit ${curlExitCode}: $curlErrorText"
     }
     $parts = $curlResult.Split('|')
     if ($parts.Count -lt 4) { throw "Could not parse bounded HTTPS result: $curlResult" }
@@ -130,6 +199,9 @@ try {
     $curlLocalEndpoint = if ($parts.Count -ge 6) { "$($parts[4]):$($parts[5])" } else { $null }
     $curlRemoteEndpoint = if ($parts.Count -ge 7) { "$($parts[2]):$($parts[6])" } else { "$($parts[2]):443" }
     if ($httpCode -lt 200 -or $httpCode -ge 400 -or $downloaded -gt $MaxResponseBytes) { throw "Unexpected HTTP result or response exceeded cap: $curlResult" }
+}
+catch {
+    $failureMessage = $_.Exception.Message
 }
 finally {
     try {
@@ -164,6 +236,62 @@ finally {
     }
 }
 
+if ($failureMessage) {
+    $failedRouteRemaining = @(Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue)
+    $failedTunRemaining = Get-NetAdapter -Name 'Pathweave' -ErrorAction SilentlyContinue
+    $failedRoutesAfter = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.InterfaceIndex)|$($_.NextHop)|$($_.RouteMetric)|$($_.PolicyStore)" } | Sort-Object)
+    $failedVirtualAfter = @(Get-NetAdapter -Name 'net-merge','utun8' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name)|$($_.ifIndex)|$($_.Status)" } | Sort-Object)
+    $ndisEventCount = 0
+    $targetAddressSeen = $false
+    if ($CaptureBackend -eq 'NetshTrace' -and (Test-Path -LiteralPath $packetXml)) {
+        $ndisEventCount = (Select-String -LiteralPath $packetXml -Pattern 'Microsoft-Windows-NDIS-PacketCapture').Count
+        $targetAddressSeen = [bool](Select-String -LiteralPath $packetXml -Pattern 'AC4293F3' -SimpleMatch -Quiet)
+    }
+    $acceptedCount = if (Test-Path -LiteralPath $engineOut) { (Select-String -LiteralPath $engineOut -Pattern '"message":"TCP flow accepted"').Count } else { 0 }
+    $capacityRejectedCount = if (Test-Path -LiteralPath $engineOut) { (Select-String -LiteralPath $engineOut -Pattern '"stage":"tcp_flow_rejected_capacity"').Count } else { 0 }
+    $connectTimeoutCount = if (Test-Path -LiteralPath $engineOut) { (Select-String -LiteralPath $engineOut -Pattern '"stage":"tcp_connect_timed_out"').Count } else { 0 }
+    $traceStatusAfter = netsh trace show status 2>&1 | Out-String
+    $failedReport = [pscustomobject]@{
+        status = 'failed'
+        failure = $failureMessage
+        adapter_alias = $adapter.Name
+        interface_guid = $ExpectedGuid
+        interface_index = $InterfaceIndex
+        interface_luid = $identity.luid
+        operational = $identity.operational
+        ipv4_addresses = $identity.ipv4_addresses
+        default_gateways = $identity.default_gateways
+        route_to_destination_before_test = @($routeBefore)
+        temporary_route_during_test = @($routeDuring)
+        selected_source_ipv4 = $selectedSourceIPv4
+        direct_socket = $directSocketResult
+        max_connections = $MaxConnections
+        connect_timeout_seconds = $ConnectTimeoutSecs
+        curl_result = $curlResult
+        curl_exit_code = $curlExitCode
+        curl_error = if (Test-Path -LiteralPath $curlErrorPath) { (Get-Content -LiteralPath $curlErrorPath -Raw).Trim() } else { $null }
+        pathweave_tcp_socket_samples = $pathweaveSocketSamples.ToArray()
+        tcp_flow_accepted_count = $acceptedCount
+        tcp_capacity_rejected_count = $capacityRejectedCount
+        tcp_connect_timeout_count = $connectTimeoutCount
+        capture_backend = $CaptureBackend
+        etl = $etl
+        decoded_xml = if (Test-Path -LiteralPath $packetXml) { $packetXml } else { $null }
+        ndis_provider_lines = $ndisEventCount
+        destination_ipv4_bytes_seen = $targetAddressSeen
+        capture_stop_error = $captureStopError
+        route_removed = ($failedRouteRemaining.Count -eq 0)
+        tun_removed = (-not $failedTunRemaining)
+        default_routes_unchanged = (-not [bool](Compare-Object $routesBefore $failedRoutesAfter))
+        existing_virtual_adapters_unchanged = (-not [bool](Compare-Object $virtualBefore $failedVirtualAfter))
+        netsh_trace_stopped = (-not [bool]($traceStatusAfter -match '(?im)^\s*Status\s*:\s*Running'))
+        engine_log = $engineOut
+        engine_error_log = $engineErr
+    }
+    $failedReport | ConvertTo-Json -Depth 6 | Set-Content -LiteralPath $resultPath -Encoding UTF8
+    throw "Bounded Pathweave validation failed: $failureMessage (evidence: $resultPath)"
+}
+
 if ($captureStopError) { throw $captureStopError }
 
 $routeRemaining = @(Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue)
@@ -187,21 +315,24 @@ if ($CaptureBackend -eq 'PacketMonitor') {
     $captureEvidence = [pscustomobject]@{ packet_count = $capturedPackets; packet_text = $packetText }
 }
 else {
-    $engineLogLines = @()
+    $engineEvents = @()
     foreach ($logPath in @($engineOut, $engineErr)) {
-        if (Test-Path -LiteralPath $logPath) { $engineLogLines += Get-Content -LiteralPath $logPath }
+        if (Test-Path -LiteralPath $logPath) {
+            foreach ($line in Get-Content -LiteralPath $logPath) {
+                try { $engineEvents += (ConvertFrom-Json -InputObject $line -ErrorAction Stop) } catch { }
+            }
+        }
     }
-    $engineLogLines = @($engineLogLines | ForEach-Object { $_ -replace '\x1b\[[0-9;?]*[ -/]*[@-~]', '' })
-    $connectedLines = @($engineLogLines | Where-Object {
-        $_ -match 'TCP flow connected and pinned' -and
-        $_ -match "interface_index=$InterfaceIndex(?:\s|$)" -and
-        $_ -match ('outbound_peer=Some\(' + [regex]::Escape("$DestinationIPv4`:443") + '\)')
+    $connectedEvents = @($engineEvents | Where-Object {
+        $_.message -eq 'TCP flow connected and pinned' -and
+        [int]$_.interface_index -eq $InterfaceIndex -and
+        [string]$_.outbound_peer -match ('Some\(' + [regex]::Escape("$DestinationIPv4`:443") + '\)')
     })
-    if ($connectedLines.Count -ne 1) { throw "Expected one logged Pathweave TCP flow to $DestinationIPv4`:443 on interface $InterfaceIndex; found $($connectedLines.Count)." }
-    $flowLine = $connectedLines[0].ToString()
-    if ($flowLine -notmatch 'outbound_local=Some\((?<endpoint>(?<ip>(?:\d{1,3}\.){3}\d{1,3}):(?<port>\d+))\)') { throw 'Pathweave did not log a parseable outbound local IPv4 endpoint.' }
+    if ($connectedEvents.Count -ne 1) { throw "Expected one logged Pathweave TCP flow to $DestinationIPv4`:443 on interface $InterfaceIndex; found $($connectedEvents.Count)." }
+    $flowEvent = $connectedEvents[0]
+    if ([string]$flowEvent.outbound_local -notmatch 'Some\((?<endpoint>(?<ip>(?:\d{1,3}\.){3}\d{1,3}):(?<port>\d+))\)') { throw 'Pathweave did not log a parseable outbound local IPv4 endpoint.' }
     $outboundLocal = $Matches.endpoint
-    if ($flowLine -notmatch 'outbound_peer=Some\((?<endpoint>(?<ip>(?:\d{1,3}\.){3}\d{1,3}):(?<port>\d+))\)') { throw 'Pathweave did not log a parseable outbound peer IPv4 endpoint.' }
+    if ([string]$flowEvent.outbound_peer -notmatch 'Some\((?<endpoint>(?<ip>(?:\d{1,3}\.){3}\d{1,3}):(?<port>\d+))\)') { throw 'Pathweave did not log a parseable outbound peer IPv4 endpoint.' }
     $outboundPeer = $Matches.endpoint
     $localParts = $outboundLocal.Split(':')
     $peerParts = $outboundPeer.Split(':')
@@ -232,16 +363,36 @@ else {
         if (-not $hex -or ($hex.Length % 2) -ne 0) { continue }
         $frame = New-Object byte[] ($hex.Length / 2)
         for ($i = 0; $i -lt $frame.Length; $i++) { $frame[$i] = [Convert]::ToByte($hex.Substring($i * 2, 2), 16) }
-        if ($frame.Length -lt 54) { continue }
-
-        $ipOffset = 14
-        $etherType = ([int]$frame[12] -shl 8) -bor [int]$frame[13]
-        while ($etherType -eq 0x8100 -or $etherType -eq 0x88a8) {
-            if ($frame.Length -lt ($ipOffset + 4)) { break }
-            $etherType = ([int]$frame[$ipOffset + 2] -shl 8) -bor [int]$frame[$ipOffset + 3]
-            $ipOffset += 4
+        if ($frame.Length -lt 34) { continue }
+        $ipOffset = -1
+        $etherType = 0
+        if ($frame.Length -ge 14) {
+            $etherType = ([int]$frame[12] -shl 8) -bor [int]$frame[13]
+            $ipOffset = 14
+            while ($etherType -eq 0x8100 -or $etherType -eq 0x88a8) {
+                if ($frame.Length -lt ($ipOffset + 4)) { $ipOffset = -1; break }
+                $etherType = ([int]$frame[$ipOffset + 2] -shl 8) -bor [int]$frame[$ipOffset + 3]
+                $ipOffset += 4
+            }
+            if ($etherType -ne 0x0800) { $ipOffset = -1 }
         }
-        if ($etherType -ne 0x0800 -or $frame.Length -lt ($ipOffset + 20)) { continue }
+        if ($ipOffset -lt 0 -and $frame.Length -ge 32) {
+            $frameControl = [int]$frame[0] -bor ([int]$frame[1] -shl 8)
+            if (($frameControl -band 0x000c) -eq 0x0008) {
+                $headerLength = 24
+                if (($frameControl -band 0x0300) -eq 0x0300) { $headerLength += 6 }
+                if (($frameControl -band 0x0080) -ne 0) {
+                    $headerLength += 2
+                    if (($frameControl -band 0x8000) -ne 0) { $headerLength += 4 }
+                }
+                if ($frame.Length -ge ($headerLength + 8) -and
+                    $frame[$headerLength] -eq 0xaa -and $frame[$headerLength + 1] -eq 0xaa -and $frame[$headerLength + 2] -eq 0x03) {
+                    $etherType = ([int]$frame[$headerLength + 6] -shl 8) -bor [int]$frame[$headerLength + 7]
+                    if ($etherType -eq 0x0800) { $ipOffset = $headerLength + 8 }
+                }
+            }
+        }
+        if ($ipOffset -lt 0 -or $frame.Length -lt ($ipOffset + 20)) { continue }
         $ipHeaderLength = ($frame[$ipOffset] -band 0x0f) * 4
         $ipTotalLength = ([int]$frame[$ipOffset + 2] -shl 8) -bor [int]$frame[$ipOffset + 3]
         $fragmentOffset = (([int]$frame[$ipOffset + 6] -shl 8) -bor [int]$frame[$ipOffset + 7]) -band 0x1fff
@@ -282,7 +433,7 @@ else {
         required_http_body_bytes = $downloaded
     }
     $flowId = $null
-    if ($flowLine -match 'flow_id=(\d+)') { $flowId = [uint64]$Matches[1] }
+    if ($flowEvent.flow_id) { $flowId = [uint64]$flowEvent.flow_id }
     $pathweaveSocket = [pscustomobject]@{
         flow_id = $flowId
         interface_index = $InterfaceIndex
@@ -299,7 +450,15 @@ $report = [pscustomobject]@{
     interface_mac = $adapter.MacAddress
     source_ipv4 = ($identity.ipv4_addresses | Select-Object -First 1)
     destination = "$HostName ($DestinationIPv4):443"
+    route_to_destination_before_test = @($routeBefore)
+    temporary_route_during_test = @($routeDuring)
+    direct_socket = $directSocketResult
+    selected_source_ipv4 = $selectedSourceIPv4
+    max_connections = $MaxConnections
+    connect_timeout_seconds = $ConnectTimeoutSecs
+    pathweave_tcp_socket_samples = @($pathweaveSocketSamples)
     http_result = $curlResult
+    curl_exit_code = $curlExitCode
     curl_frontend_socket = [pscustomobject]@{ local_endpoint = $curlLocalEndpoint; remote_endpoint = $curlRemoteEndpoint }
     response_byte_limit = $MaxResponseBytes
     capture_backend = $CaptureBackend

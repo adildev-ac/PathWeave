@@ -192,10 +192,36 @@ foreach ($flow in $flows) {
         if (-not $hex -or ($hex.Length % 2) -ne 0) { continue }
         $frame = New-Object byte[] ($hex.Length / 2)
         for ($n = 0; $n -lt $frame.Length; $n++) { $frame[$n] = [Convert]::ToByte($hex.Substring($n * 2, 2), 16) }
-        if ($frame.Length -lt 54) { continue }
-        $ipOffset = 14
-        $etherType = ([int]$frame[12] -shl 8) -bor [int]$frame[13]
-        if ($etherType -ne 0x0800 -or $frame[$ipOffset + 9] -ne 6) { continue }
+        if ($frame.Length -lt 34) { continue }
+        $ipOffset = -1
+        $etherType = 0
+        if ($frame.Length -ge 14) {
+            $etherType = ([int]$frame[12] -shl 8) -bor [int]$frame[13]
+            $ipOffset = 14
+            while ($etherType -eq 0x8100 -or $etherType -eq 0x88a8) {
+                if ($frame.Length -lt ($ipOffset + 4)) { $ipOffset = -1; break }
+                $etherType = ([int]$frame[$ipOffset + 2] -shl 8) -bor [int]$frame[$ipOffset + 3]
+                $ipOffset += 4
+            }
+            if ($etherType -ne 0x0800) { $ipOffset = -1 }
+        }
+        if ($ipOffset -lt 0 -and $frame.Length -ge 32) {
+            $frameControl = [int]$frame[0] -bor ([int]$frame[1] -shl 8)
+            if (($frameControl -band 0x000c) -eq 0x0008) {
+                $headerLength = 24
+                if (($frameControl -band 0x0300) -eq 0x0300) { $headerLength += 6 }
+                if (($frameControl -band 0x0080) -ne 0) {
+                    $headerLength += 2
+                    if (($frameControl -band 0x8000) -ne 0) { $headerLength += 4 }
+                }
+                if ($frame.Length -ge ($headerLength + 8) -and
+                    $frame[$headerLength] -eq 0xaa -and $frame[$headerLength + 1] -eq 0xaa -and $frame[$headerLength + 2] -eq 0x03) {
+                    $etherType = ([int]$frame[$headerLength + 6] -shl 8) -bor [int]$frame[$headerLength + 7]
+                    if ($etherType -eq 0x0800) { $ipOffset = $headerLength + 8 }
+                }
+            }
+        }
+        if ($ipOffset -lt 0 -or $frame.Length -lt ($ipOffset + 20) -or $frame[$ipOffset + 9] -ne 6) { continue }
         $ipHeaderLength = ($frame[$ipOffset] -band 0x0f) * 4
         $tcpOffset = $ipOffset + $ipHeaderLength
         if ($ipHeaderLength -lt 20 -or $frame.Length -lt ($tcpOffset + 20)) { continue }
