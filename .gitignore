@@ -1,4 +1,5 @@
 /target/
+/vendor/ipstack/.cargo-ok
 **/.env
 **/.env.*
 *.log
