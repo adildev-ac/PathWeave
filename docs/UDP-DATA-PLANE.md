@@ -2,7 +2,7 @@
 
 The engine now has a datagram-oriented UDP path alongside the TCP relay. UDP remains opt-in with `--enable-udp` so the current TCP-only operating mode does not change unexpectedly.
 
-For each original source/destination tuple, the stack preserves inbound UDP datagram boundaries. Netmerge creates one connected outbound UDP socket, applies Windows `IP_UNICAST_IF` / `IPV6_UNICAST_IF` for the selected adapter before connecting it to the recovered destination, and pins that flow to the adapter for its lifetime. Replies are written as one complete UDP packet back through the TUN stack.
+For each original source/destination tuple, the stack preserves inbound UDP datagram boundaries. Pathweave creates one connected outbound UDP socket, applies Windows `IP_UNICAST_IF` / `IPV6_UNICAST_IF` for the selected adapter before connecting it to the recovered destination, and pins that flow to the adapter for its lifetime. Replies are written as one complete UDP packet back through the TUN stack.
 
 The UDP path preserves empty datagrams and rejects replies that exceed the TUN MTU. It does not truncate, fragment, inspect, or decrypt DNS/QUIC payloads. Oversized requests or replies are counted as drops. The socket receive buffer is large enough for a maximum UDP payload, so a too-small userspace buffer cannot silently clip the datagram.
 

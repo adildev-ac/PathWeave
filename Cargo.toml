@@ -1,6 +1,6 @@
 [package]
-name = "netmerge-engine-prototype"
-default-run = "netmerge-engine-prototype"
+name = "pathweave-engine"
+default-run = "pathweave-engine"
 version = "0.1.0"
 edition = "2024"
 license = "MIT"

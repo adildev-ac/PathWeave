@@ -9,6 +9,9 @@ use serde::Serialize;
 use tokio::{task::JoinHandle, time::MissedTickBehavior};
 use tracing::warn;
 
+type AddressSnapshot = HashMap<u32, (Vec<String>, Vec<String>)>;
+type GatewaySnapshot = HashMap<u32, Vec<String>>;
+
 #[derive(Clone, Debug)]
 pub struct InterfaceMetrics {
     pub index: u32,
@@ -16,6 +19,9 @@ pub struct InterfaceMetrics {
     pub guid: String,
     pub alias: String,
     pub operational: bool,
+    pub ipv4_addresses: Vec<String>,
+    pub ipv6_addresses: Vec<String>,
+    pub default_gateways: Vec<String>,
     pub mtu: u32,
     /// Physical/media link rates from Windows. These are diagnostic only and are
     /// never treated as internet capacity.
@@ -35,6 +41,7 @@ pub struct InterfaceMetrics {
     pub peak_download_bps: f64,
     pub peak_upload_bps: f64,
     pub counter_samples: u64,
+    pub throughput_history: VecDeque<ThroughputSample>,
     pub counter_reset: bool,
     pub latency_ms: Option<f64>,
     pub min_latency_ms: Option<f64>,
@@ -50,6 +57,15 @@ pub struct InterfaceMetrics {
     probe_outcomes: VecDeque<bool>,
 }
 
+#[derive(Clone, Debug, Serialize)]
+pub struct ThroughputSample {
+    pub sampled_at_unix_ms: u64,
+    /// Observed adapter byte rate, not an estimate of available link capacity.
+    pub upload_bytes_per_sec: f64,
+    /// Observed adapter byte rate, not an estimate of available link capacity.
+    pub download_bytes_per_sec: f64,
+}
+
 impl InterfaceMetrics {
     fn from_raw(raw: RawInterface) -> Self {
         Self {
@@ -58,6 +74,9 @@ impl InterfaceMetrics {
             guid: raw.guid,
             alias: raw.alias,
             operational: raw.operational,
+            ipv4_addresses: raw.ipv4_addresses,
+            ipv6_addresses: raw.ipv6_addresses,
+            default_gateways: raw.default_gateways,
             mtu: raw.mtu,
             transmit_link_bps: raw.transmit_link_bps,
             receive_link_bps: raw.receive_link_bps,
@@ -75,6 +94,7 @@ impl InterfaceMetrics {
             peak_download_bps: 0.0,
             peak_upload_bps: 0.0,
             counter_samples: 0,
+            throughput_history: VecDeque::with_capacity(60),
             counter_reset: false,
             latency_ms: None,
             min_latency_ms: None,
@@ -108,7 +128,10 @@ impl InterfaceMetrics {
     }
 
     fn sample(&mut self, raw: &RawInterface, elapsed: Duration, alpha: f64) {
-        self.counter_reset = raw.in_octets < self.in_octets || raw.out_octets < self.out_octets;
+        self.counter_reset = raw.in_octets < self.in_octets
+            || raw.out_octets < self.out_octets
+            || raw.index != self.index
+            || raw.luid != self.luid;
         if !self.counter_reset && self.guid == raw.guid {
             let packet_delta = raw.in_packets.saturating_sub(self.in_packets)
                 + raw.out_packets.saturating_sub(self.out_packets);
@@ -135,6 +158,19 @@ impl InterfaceMetrics {
             self.peak_download_bps = self.peak_download_bps.max(download);
             self.peak_upload_bps = self.peak_upload_bps.max(upload);
             self.counter_samples += 1;
+            let sampled_at_unix_ms = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_millis()
+                .min(u64::MAX as u128) as u64;
+            self.throughput_history.push_back(ThroughputSample {
+                sampled_at_unix_ms,
+                upload_bytes_per_sec: upload,
+                download_bytes_per_sec: download,
+            });
+            if self.throughput_history.len() > 60 {
+                self.throughput_history.pop_front();
+            }
         } else if self.counter_reset || self.guid != raw.guid {
             self.download_bps = 0.0;
             self.upload_bps = 0.0;
@@ -145,6 +181,9 @@ impl InterfaceMetrics {
         self.guid = raw.guid.clone();
         self.alias = raw.alias.clone();
         self.operational = raw.operational;
+        self.ipv4_addresses = raw.ipv4_addresses.clone();
+        self.ipv6_addresses = raw.ipv6_addresses.clone();
+        self.default_gateways = raw.default_gateways.clone();
         self.mtu = raw.mtu;
         self.transmit_link_bps = raw.transmit_link_bps;
         self.receive_link_bps = raw.receive_link_bps;
@@ -218,7 +257,15 @@ impl TelemetryStore {
         let mut snapshot = (*self.snapshot()).clone();
         let mut present = HashMap::with_capacity(raw.len());
         for item in raw {
-            let mut metrics = match snapshot.interfaces.remove(&item.index) {
+            let previous = snapshot.interfaces.remove(&item.index).or_else(|| {
+                let old_index = snapshot
+                    .interfaces
+                    .iter()
+                    .find(|(_, metrics)| metrics.guid == item.guid)
+                    .map(|(index, _)| *index)?;
+                snapshot.interfaces.remove(&old_index)
+            });
+            let mut metrics = match previous {
                 Some(mut previous) if previous.guid == item.guid => {
                     previous.sample(&item, elapsed, alpha);
                     previous
@@ -248,6 +295,9 @@ pub(crate) struct RawInterface {
     pub guid: String,
     pub alias: String,
     pub operational: bool,
+    pub ipv4_addresses: Vec<String>,
+    pub ipv6_addresses: Vec<String>,
+    pub default_gateways: Vec<String>,
     pub mtu: u32,
     pub transmit_link_bps: u64,
     pub receive_link_bps: u64,
@@ -299,6 +349,9 @@ pub struct InterfaceDiagnostics {
     pub stable_guid: String,
     pub name: String,
     pub operational: bool,
+    pub ipv4_addresses: Vec<String>,
+    pub ipv6_addresses: Vec<String>,
+    pub default_gateways: Vec<String>,
     pub mtu: u32,
     pub transmit_link_mbps: f64,
     pub receive_link_mbps: f64,
@@ -313,6 +366,7 @@ pub struct InterfaceDiagnostics {
     pub recent_error_discard_ratio: Option<f64>,
     pub counter_age_ms: u64,
     pub counter_samples: u64,
+    pub observed_throughput_history: Vec<ThroughputSample>,
     pub counter_reset: bool,
     pub latency_ms: Option<f64>,
     pub min_latency_ms: Option<f64>,
@@ -334,6 +388,9 @@ pub fn diagnostics(snapshot: &TelemetrySnapshot) -> Vec<InterfaceDiagnostics> {
             stable_guid: m.guid.clone(),
             name: m.alias.clone(),
             operational: m.operational,
+            ipv4_addresses: m.ipv4_addresses.clone(),
+            ipv6_addresses: m.ipv6_addresses.clone(),
+            default_gateways: m.default_gateways.clone(),
             mtu: m.mtu,
             transmit_link_mbps: m.transmit_link_bps as f64 / 1_000_000.0,
             receive_link_mbps: m.receive_link_bps as f64 / 1_000_000.0,
@@ -348,6 +405,7 @@ pub fn diagnostics(snapshot: &TelemetrySnapshot) -> Vec<InterfaceDiagnostics> {
             recent_error_discard_ratio: m.recent_error_discard_ratio,
             counter_age_ms: m.counter_age().as_millis() as u64,
             counter_samples: m.counter_samples,
+            observed_throughput_history: m.throughput_history.iter().cloned().collect(),
             counter_reset: m.counter_reset,
             latency_ms: m.latency_ms,
             min_latency_ms: m.min_latency_ms,
@@ -398,6 +456,9 @@ fn read_interface_counters() -> io::Result<Vec<RawInterface>> {
                 guid: format_guid(row.InterfaceGuid),
                 alias: decode_utf16(&row.Alias),
                 operational: row.OperStatus == IfOperStatusUp,
+                ipv4_addresses: Vec::new(),
+                ipv6_addresses: Vec::new(),
+                default_gateways: Vec::new(),
                 mtu: row.Mtu,
                 transmit_link_bps: row.TransmitLinkSpeed,
                 receive_link_bps: row.ReceiveLinkSpeed,
@@ -412,7 +473,104 @@ fn read_interface_counters() -> io::Result<Vec<RawInterface>> {
             })
             .collect();
         FreeMibTable(table.cast());
+        let mut copied: Vec<RawInterface> = copied;
+        match read_address_routes() {
+            Ok((addresses, gateways)) => {
+                for row in &mut copied {
+                    if let Some((ipv4, ipv6)) = addresses.get(&row.index) {
+                        row.ipv4_addresses = ipv4.clone();
+                        row.ipv6_addresses = ipv6.clone();
+                    }
+                    row.default_gateways = gateways.get(&row.index).cloned().unwrap_or_default();
+                }
+            }
+            Err(error) => warn!(%error, "interface address and default-route refresh failed"),
+        }
         Ok(copied)
+    }
+}
+
+#[cfg(windows)]
+fn read_address_routes() -> io::Result<(AddressSnapshot, GatewaySnapshot)> {
+    use std::{
+        net::{IpAddr, Ipv4Addr, Ipv6Addr},
+        slice,
+    };
+    use windows_sys::Win32::{
+        NetworkManagement::IpHelper::{
+            FreeMibTable, GetIpForwardTable2, GetUnicastIpAddressTable, MIB_IPFORWARD_ROW2,
+            MIB_IPFORWARD_TABLE2, MIB_UNICASTIPADDRESS_ROW, MIB_UNICASTIPADDRESS_TABLE,
+        },
+        Networking::WinSock::{AF_INET, AF_INET6, AF_UNSPEC, SOCKADDR_INET},
+    };
+
+    unsafe fn as_ip(address: SOCKADDR_INET) -> Option<IpAddr> {
+        match unsafe { address.si_family } {
+            AF_INET => {
+                let bytes = unsafe { address.Ipv4.sin_addr.S_un.S_addr.to_ne_bytes() };
+                Some(IpAddr::V4(Ipv4Addr::from(bytes)))
+            }
+            AF_INET6 => {
+                let bytes = unsafe { address.Ipv6.sin6_addr.u.Byte };
+                Some(IpAddr::V6(Ipv6Addr::from(bytes)))
+            }
+            _ => None,
+        }
+    }
+
+    unsafe {
+        let mut address_table: *mut MIB_UNICASTIPADDRESS_TABLE = std::ptr::null_mut();
+        let result = GetUnicastIpAddressTable(AF_UNSPEC, &mut address_table);
+        if result != 0 {
+            return Err(io::Error::from_raw_os_error(result as i32));
+        }
+        if address_table.is_null() {
+            return Err(io::Error::other("GetUnicastIpAddressTable returned null"));
+        }
+        let address_rows = slice::from_raw_parts(
+            std::ptr::addr_of!((*address_table).Table).cast::<MIB_UNICASTIPADDRESS_ROW>(),
+            (*address_table).NumEntries as usize,
+        );
+        let mut addresses: HashMap<u32, (Vec<String>, Vec<String>)> = HashMap::new();
+        for row in address_rows {
+            let Some(ip) = as_ip(row.Address) else {
+                continue;
+            };
+            let entry = addresses.entry(row.InterfaceIndex).or_default();
+            match ip {
+                IpAddr::V4(ip) => entry.0.push(format!("{ip}/{}", row.OnLinkPrefixLength)),
+                IpAddr::V6(ip) => entry.1.push(format!("{ip}/{}", row.OnLinkPrefixLength)),
+            }
+        }
+        FreeMibTable(address_table.cast());
+
+        let mut route_table: *mut MIB_IPFORWARD_TABLE2 = std::ptr::null_mut();
+        let result = GetIpForwardTable2(AF_UNSPEC, &mut route_table);
+        if result != 0 {
+            return Err(io::Error::from_raw_os_error(result as i32));
+        }
+        if route_table.is_null() {
+            return Err(io::Error::other("GetIpForwardTable2 returned null"));
+        }
+        let route_rows = slice::from_raw_parts(
+            std::ptr::addr_of!((*route_table).Table).cast::<MIB_IPFORWARD_ROW2>(),
+            (*route_table).NumEntries as usize,
+        );
+        let mut gateways: HashMap<u32, Vec<String>> = HashMap::new();
+        for row in route_rows {
+            if row.DestinationPrefix.PrefixLength != 0 {
+                continue;
+            }
+            if let Some(next_hop) = as_ip(row.NextHop).filter(|ip| !ip.is_unspecified()) {
+                let list = gateways.entry(row.InterfaceIndex).or_default();
+                let value = next_hop.to_string();
+                if !list.contains(&value) {
+                    list.push(value);
+                }
+            }
+        }
+        FreeMibTable(route_table.cast());
+        Ok((addresses, gateways))
     }
 }
 
@@ -453,6 +611,9 @@ mod tests {
             guid: guid.to_owned(),
             alias: format!("adapter-{index}"),
             operational: true,
+            ipv4_addresses: Vec::new(),
+            ipv6_addresses: Vec::new(),
+            default_gateways: Vec::new(),
             mtu: 1500,
             transmit_link_bps: 1_000_000_000,
             receive_link_bps: 1_000_000_000,
@@ -548,5 +709,57 @@ mod tests {
             store.snapshot().interfaces[&4].recent_error_discard_ratio,
             Some(0.01)
         );
+    }
+
+    #[test]
+    fn address_and_gateway_snapshots_refresh_and_throughput_history_is_bounded() {
+        let store = TelemetryStore::default();
+        let mut initial = raw(8, "wifi-guid", 0, 0);
+        initial.ipv4_addresses = vec!["192.0.2.10/24".into()];
+        initial.default_gateways = vec!["192.0.2.1".into()];
+        store.update_counters(vec![initial], Duration::from_secs(1), 0.35);
+        for sample in 1..=75 {
+            let mut next = raw(8, "wifi-guid", sample * 10_000, sample * 20_000);
+            next.ipv4_addresses = vec!["192.0.2.11/24".into()];
+            next.ipv6_addresses = vec!["2001:db8::10/64".into()];
+            next.default_gateways = vec!["192.0.2.254".into()];
+            store.update_counters(vec![next], Duration::from_secs(1), 0.35);
+        }
+        let metrics = store.snapshot();
+        let iface = &metrics.interfaces[&8];
+        assert_eq!(iface.ipv4_addresses, vec!["192.0.2.11/24"]);
+        assert_eq!(iface.ipv6_addresses, vec!["2001:db8::10/64"]);
+        assert_eq!(iface.default_gateways, vec!["192.0.2.254"]);
+        assert_eq!(iface.throughput_history.len(), 60);
+        assert_eq!(
+            iface
+                .throughput_history
+                .back()
+                .unwrap()
+                .upload_bytes_per_sec,
+            20_000.0
+        );
+    }
+
+    #[test]
+    fn changed_index_preserves_guid_history_without_counting_a_fake_rate() {
+        let store = TelemetryStore::default();
+        store.update_counters(vec![raw(8, "wifi-guid", 0, 0)], Duration::ZERO, 0.35);
+        store.update_counters(
+            vec![raw(8, "wifi-guid", 1000, 2000)],
+            Duration::from_secs(1),
+            0.35,
+        );
+        assert_eq!(store.snapshot().interfaces[&8].throughput_history.len(), 1);
+        store.update_counters(
+            vec![raw(11, "wifi-guid", 1500, 2500)],
+            Duration::from_secs(1),
+            0.35,
+        );
+        let snapshot = store.snapshot();
+        assert!(!snapshot.interfaces.contains_key(&8));
+        assert_eq!(snapshot.interfaces[&11].throughput_history.len(), 1);
+        assert_eq!(snapshot.interfaces[&11].download_bps, 0.0);
+        assert!(snapshot.interfaces[&11].counter_reset);
     }
 }

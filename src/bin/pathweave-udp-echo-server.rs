@@ -5,7 +5,7 @@ use clap::Parser;
 use tokio::net::UdpSocket;
 
 #[derive(Debug, Parser)]
-#[command(about = "Loopback UDP echo server for Netmerge datagram tests")]
+#[command(about = "Loopback UDP echo server for Pathweave datagram tests")]
 struct Args {
     #[arg(long, default_value = "127.0.0.1:39092")]
     listen: SocketAddr,

@@ -40,7 +40,7 @@ impl From<Mode> for Operation {
 }
 
 #[derive(Debug, Parser)]
-#[command(about = "Budgeted TCP test client for the Netmerge TUN path")]
+#[command(about = "Budgeted TCP test client for the Pathweave TUN path")]
 struct Args {
     /// Controlled server address. Route this host through the test TUN for live path tests.
     #[arg(long)]
@@ -124,10 +124,10 @@ async fn main() -> Result<()> {
     if args.mode == Mode::HalfClose && args.bytes.is_none() {
         bail!("HALF_CLOSE requires --bytes");
     }
-    let token = std::env::var("NETMERGE_TEST_TOKEN")
-        .context("set NETMERGE_TEST_TOKEN to the same secret used by the test server")?;
+    let token = std::env::var("PATHWEAVE_TEST_TOKEN")
+        .context("set PATHWEAVE_TEST_TOKEN to the same secret used by the test server")?;
     if token.len() < 24 {
-        bail!("NETMERGE_TEST_TOKEN must contain at least 24 characters");
+        bail!("PATHWEAVE_TEST_TOKEN must contain at least 24 characters");
     }
     let directions = if matches!(args.mode, Mode::Duplex | Mode::HalfClose) {
         2u64

@@ -25,6 +25,7 @@ pub async fn run(
     listener: TcpListener,
     policy: Arc<QosPolicyManager>,
     interfaces: Arc<InterfacePool>,
+    token: Arc<String>,
 ) -> io::Result<()> {
     let slots = Arc::new(Semaphore::new(8));
     loop {
@@ -34,9 +35,10 @@ pub async fn run(
         };
         let policy = policy.clone();
         let interfaces = interfaces.clone();
+        let token = token.clone();
         tokio::spawn(async move {
             let _slot = slot;
-            let _ = handle(stream, policy, interfaces).await;
+            let _ = handle(stream, policy, interfaces, token).await;
         });
     }
 }
@@ -45,6 +47,7 @@ async fn handle(
     stream: TcpStream,
     policy: Arc<QosPolicyManager>,
     interfaces: Arc<InterfacePool>,
+    token: Arc<String>,
 ) -> io::Result<()> {
     let (read, mut write) = stream.into_split();
     let mut reader = BufReader::new(read).take(1024);
@@ -55,7 +58,25 @@ async fn handle(
     )
     .await
     .map_err(|_| io::Error::new(io::ErrorKind::TimedOut, "QoS control request timed out"))??;
-    let fields: Vec<_> = line.split_whitespace().collect();
+    let mut fields: Vec<_> = line.split_whitespace().collect();
+    let authenticated = fields.len() >= 3
+        && fields[0] == "AUTH"
+        && constant_time_eq(fields[1].as_bytes(), token.as_bytes());
+    if fields.first() == Some(&"AUTH") {
+        if !authenticated {
+            write.write_all(b"ERROR authentication failed\n").await?;
+            return Ok(());
+        }
+        fields.drain(..2);
+    }
+    let mutating = matches!(
+        fields.first(),
+        Some(&"ROLLBACK" | &"SET-GUID" | &"SET-INDEX")
+    );
+    if mutating && !authenticated {
+        write.write_all(b"ERROR authentication required\n").await?;
+        return Ok(());
+    }
     let response = match fields.as_slice() {
         ["GET"] => format!("{}\n", serde_json::to_string(&policy.snapshot()).unwrap_or_else(|_| "{}".into())),
         ["ROLLBACK"] => match policy.rollback().await {
@@ -86,6 +107,16 @@ async fn handle(
         _ => "ERROR use GET, SET-GUID <guid> <upload|download> <mbps>, SET-INDEX <index> <upload|download> <mbps>, or ROLLBACK\n".into(),
     };
     write.write_all(response.as_bytes()).await
+}
+
+fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
+    if left.len() != right.len() {
+        return false;
+    }
+    left.iter()
+        .zip(right)
+        .fold(0u8, |diff, (a, b)| diff | (a ^ b))
+        == 0
 }
 
 fn parse_direction(value: &str) -> io::Result<QosDirection> {
@@ -136,5 +167,8 @@ mod tests {
         assert_eq!(parse_rate("8").unwrap(), Some(1_000_000));
         assert!(parse_rate("NaN").is_err());
         assert_eq!(parse_direction("DOWNLOAD").unwrap(), QosDirection::Download);
+        assert!(constant_time_eq(b"secret", b"secret"));
+        assert!(!constant_time_eq(b"secret", b"secreu"));
+        assert!(!constant_time_eq(b"secret", b"short"));
     }
 }

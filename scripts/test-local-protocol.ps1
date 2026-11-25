@@ -5,8 +5,8 @@ param(
 $ErrorActionPreference = 'Stop'
 $workspace = Split-Path $PSScriptRoot -Parent
 $target = Join-Path $workspace 'target'
-$server = Join-Path $target 'debug\netmerge-test-server.exe'
-$client = Join-Path $target 'debug\netmerge-test.exe'
+$server = Join-Path $target 'debug\pathweave-test-server.exe'
+$client = Join-Path $target 'debug\pathweave-test.exe'
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $serverLog = Join-Path $target "local-test-server-$stamp.log"
 $serverError = Join-Path $target "local-test-server-error-$stamp.log"
@@ -22,7 +22,7 @@ New-Item -ItemType Directory -Path $results | Out-Null
 $script:testCounter = 0
 
 $token = ((1..4 | ForEach-Object { [guid]::NewGuid().ToString('N') }) -join '')
-$env:NETMERGE_TEST_TOKEN = $token
+$env:PATHWEAVE_TEST_TOKEN = $token
 $process = $null
 try {
     $process = Start-Process -FilePath $server -WorkingDirectory $workspace -WindowStyle Hidden -PassThru `
@@ -64,15 +64,15 @@ try {
     if ($LASTEXITCODE -eq 0) { throw 'Server accepted a transfer exceeding its configured per-connection cap.' }
     'PASS server transfer cap' | Out-Host
 
-    $savedToken = $env:NETMERGE_TEST_TOKEN
+    $savedToken = $env:PATHWEAVE_TEST_TOKEN
     try {
-        $env:NETMERGE_TEST_TOKEN = 'invalid-token-that-is-long-enough-000000'
+        $env:PATHWEAVE_TEST_TOKEN = 'invalid-token-that-is-long-enough-000000'
         $null = & $client --server $ServerAddress --mode download --bytes 1024 --max-bytes 1024 2>&1
         if ($LASTEXITCODE -eq 0) { throw 'Server accepted an invalid authentication token.' }
         'PASS authentication rejection' | Out-Host
     }
     finally {
-        $env:NETMERGE_TEST_TOKEN = $savedToken
+        $env:PATHWEAVE_TEST_TOKEN = $savedToken
     }
 }
 finally {
@@ -80,7 +80,7 @@ finally {
         Stop-Process -Id $process.Id -Force
         $process.WaitForExit()
     }
-    Remove-Item Env:\NETMERGE_TEST_TOKEN -ErrorAction SilentlyContinue
+    Remove-Item Env:\PATHWEAVE_TEST_TOKEN -ErrorAction SilentlyContinue
 }
 
 if ($process -and -not (Get-Process -Id $process.Id -ErrorAction SilentlyContinue)) {

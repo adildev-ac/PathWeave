@@ -5,7 +5,7 @@
 
 ## Test setup
 
-- TUN: `NetmergePrototype`, interface 47, `198.19.0.1/16`.
+- TUN: `Pathweave`, interface 47, `198.19.0.1/16`.
 - Wi-Fi: interface 8, source IPv4 `192.168.1.100`.
 - Android USB tether (Remote NDIS): interface 4, source IPv4 `10.224.251.131`.
 - Destination: `1.1.1.1:443` (`cloudflare-dns.com`), pinned by curl `--resolve`.
@@ -27,7 +27,7 @@ This verifies original destination forwarding to the intercepted IP and port, so
 
 ## Cleanup
 
-The temporary `1.1.1.1/32` route was removed and its absence verified. Packet Monitor stopped successfully. The prototype process was stopped and its `NetmergePrototype` adapter was removed. The pre-existing `net-merge` adapter remained up; no changes were made to it or to other existing routes.
+The temporary `1.1.1.1/32` route was removed and its absence verified. Packet Monitor stopped successfully. The prototype process was stopped and its `Pathweave` adapter was removed. The pre-existing `net-merge` adapter remained up; no changes were made to it or to other existing routes.
 
 ## Scope and next validation
 

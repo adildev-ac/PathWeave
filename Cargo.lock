@@ -564,24 +564,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "netmerge-engine-prototype"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "clap",
- "ipstack",
- "serde",
- "serde_json",
- "sha2",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
- "tun",
- "windows-sys",
-]
-
-[[package]]
 name = "nix"
 version = "0.32.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -619,6 +601,24 @@ name = "parking"
 version = "2.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f38d5652c16fde515bb1ecef450ab0f6a219d619a7274976324d5e377f7dceba"
+
+[[package]]
+name = "pathweave-engine"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "ipstack",
+ "serde",
+ "serde_json",
+ "sha2",
+ "tokio",
+ "toml",
+ "tracing",
+ "tracing-subscriber",
+ "tun",
+ "windows-sys",
+]
 
 [[package]]
 name = "pin-project-lite"

@@ -8,7 +8,7 @@ param(
     [ValidateRange(1, 1000)][int]$Connections = 1,
     [ValidateRange(1, 1000)][int]$Concurrency = 1,
     [long]$RateBytesPerSec = 0,
-    [string]$TokenEnvironmentVariable = 'NETMERGE_TEST_TOKEN'
+    [string]$TokenEnvironmentVariable = 'PATHWEAVE_TEST_TOKEN'
 )
 
 $ErrorActionPreference = 'Stop'
@@ -35,7 +35,7 @@ $wifi = Get-NetAdapter -Name 'Wi-Fi' -ErrorAction SilentlyContinue | Where-Objec
 $usb = Get-NetAdapter | Where-Object { $_.Status -eq 'Up' -and $_.InterfaceDescription -match 'Remote NDIS' } | Select-Object -First 1
 if (-not $wifi) { throw 'Active Wi-Fi adapter was not found.' }
 if (-not $usb) { throw 'Active Android USB Remote NDIS adapter was not found.' }
-if (Get-NetAdapter -Name 'NetmergePrototype' -ErrorAction SilentlyContinue) { throw 'A NetmergePrototype adapter already exists; refusing to replace it.' }
+if (Get-NetAdapter -Name 'Pathweave' -ErrorAction SilentlyContinue) { throw 'A Pathweave adapter already exists; refusing to replace it.' }
 if (-not (Test-NetConnection -ComputerName $serverIp -Port $serverPort -InformationLevel Quiet)) { throw 'Remote test server is not reachable before route setup.' }
 $pktmonStatus = & pktmon status 2>&1
 if ($LASTEXITCODE -ne 0 -or (($pktmonStatus -join ' ') -match '(?i)(status|state)\s*:\s*running')) {
@@ -43,8 +43,8 @@ if ($LASTEXITCODE -ne 0 -or (($pktmonStatus -join ' ') -match '(?i)(status|state
 }
 
 $workspace = Split-Path (Split-Path $PSScriptRoot -Parent) -Parent
-$engine = Join-Path $workspace 'target\release\netmerge-engine-prototype.exe'
-$client = Join-Path $workspace 'target\release\netmerge-test.exe'
+$engine = Join-Path $workspace 'target\release\pathweave-engine.exe'
+$client = Join-Path $workspace 'target\release\pathweave-test.exe'
 if (-not (Test-Path $engine) -or -not (Test-Path $client)) { throw 'Build release binaries first with cargo build --release --bins.' }
 $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
 $target = Join-Path $workspace 'target\m1a2'
@@ -74,10 +74,10 @@ try {
     $tun = $null
     while ((Get-Date) -lt $deadline -and -not $tun) {
         if ($engineProcess.HasExited) { throw "Engine exited before TUN startup. See $engineErr" }
-        $tun = Get-NetAdapter -Name 'NetmergePrototype' -ErrorAction SilentlyContinue
+        $tun = Get-NetAdapter -Name 'Pathweave' -ErrorAction SilentlyContinue
         if (-not $tun) { Start-Sleep -Milliseconds 250 }
     }
-    if (-not $tun) { throw 'NetmergePrototype did not appear within 20 seconds.' }
+    if (-not $tun) { throw 'Pathweave did not appear within 20 seconds.' }
     $profileJob = Start-Job -FilePath (Join-Path $PSScriptRoot 'profile-process.ps1') -ArgumentList $engineProcess.Id, $profileCsv
     New-NetRoute -DestinationPrefix $prefix -InterfaceIndex $tun.ifIndex -NextHop '0.0.0.0' -PolicyStore ActiveStore | Out-Null
     $addedRoute = $true
@@ -114,11 +114,11 @@ finally {
 }
 
 $routeRemaining = @(Get-NetRoute -DestinationPrefix $prefix -ErrorAction SilentlyContinue)
-$tunRemaining = Get-NetAdapter -Name 'NetmergePrototype' -ErrorAction SilentlyContinue
+$tunRemaining = Get-NetAdapter -Name 'Pathweave' -ErrorAction SilentlyContinue
 $virtualAfter = @(Get-NetAdapter -Name 'net-merge','utun8' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.Name):$($_.ifIndex):$($_.Status)" } | Sort-Object)
 $defaultRoutesAfter = @(Get-NetRoute -DestinationPrefix '0.0.0.0/0' -ErrorAction SilentlyContinue | ForEach-Object { "$($_.InterfaceIndex):$($_.NextHop):$($_.RouteMetric)" } | Sort-Object)
 if ($routeRemaining.Count -ne 0) { throw "Cleanup verification failed: $prefix remains." }
-if ($tunRemaining) { throw 'Cleanup verification failed: NetmergePrototype remains.' }
+if ($tunRemaining) { throw 'Cleanup verification failed: Pathweave remains.' }
 if (Compare-Object $preexistingVirtual $virtualAfter) { throw 'A pre-existing net-merge or utun8 adapter changed during the test.' }
 if (Compare-Object $defaultRoutesBefore $defaultRoutesAfter) { throw 'Default route set changed during the test; inspect manually.' }
     "RESULT_JSON=$clientJson`nPACKET_CAPTURE=$etl`nPACKET_TEXT=$captureText`nPROCESS_PROFILE=$profileCsv`nROUTE_CLEANUP=verified`nTUN_CLEANUP=verified`nPREEXISTING_VIRTUAL_ADAPTERS=unchanged`nDEFAULT_ROUTES=unchanged" | Set-Content -LiteralPath (Join-Path $target "tcp-soak-$stamp-cleanup.txt")

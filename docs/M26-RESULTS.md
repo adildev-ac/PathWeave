@@ -1,25 +1,31 @@
-# M2.6 Results
+# Pathweave M2.6 closure status
 
 ## Implemented
 
-- Added an independent AIMD-inspired controller per configured interface and direction. It starts only from explicitly configured capacities, honors per-interface maximums and a minimum rate, waits for persistent fresh local congestion evidence before decreasing, and increases gradually after sustained recovery.
-- Connected adaptive rate changes to the existing hierarchical token buckets. Large in-flight TCP requests are paced in bounded bucket-sized chunks after a rate reduction, preserving bytes and avoiding a failed oversized token request.
-- Added GUID/LUID/index fields to Windows interface telemetry, startup index-to-GUID resolution, GUID-based QoS limit syntax, periodic GUID reconciliation, changed-index rate reapplication, missing-adapter eligibility handling, and current-index probe resolution.
-- Added a versioned runtime policy manager for per-interface directional rates, one-step rollback, and optional loopback-only commands. Updates apply to active flows through the shared QoS engine.
-- Added opt-in CoDel-inspired UDP whole-datagram dropping based on persistent queue sojourn and backlog, with separate AQM drop diagnostics. TCP remains paced/backpressured without AQM drops.
-- Added adaptive controller, identity, runtime update, AQM, and control-listener tests; added `docs/M26-ARCHITECTURE-AUDIT.md` and the M2.6 design/operations documents.
+- Independent AIMD-inspired upload/download controllers per configured interface. Adaptation requires explicit per-direction capacity, honors configured min/max values, responds to repeated fresh local queue/error evidence, and ramps recovery gradually.
+- Runtime rates use the existing token buckets. Large in-flight TCP requests are split into paced reservations after a rate decrease, so queued bytes are preserved.
+- Version 1 TOML QoS schema with whole-file validation, GUID-keyed interface policy, startup precedence (defaults < TOML < explicit CLI), a read-only `--validate-config` command, and explicit v0 migration with backup and atomic replacement.
+- Bounded last-60 observed throughput samples with timestamps, kept distinct from trusted configured capacity. A low observed rate is never used as a link capacity estimate.
+- Windows polling of `GetIfTable2`, unicast address tables, and default routes refreshes GUID/LUID/index, addresses, operational state, and default next hops. Changes apply to new-flow selection, probes, and rates; established flows remain pinned.
+- Versioned per-interface rate updates and rollback. Optional loopback control requires a 32-byte token for mutations, with request bounds and timeout.
+- Optional CoDel-inspired UDP whole-datagram AQM. TCP is never dropped by the UDP AQM path.
+- Product/CLI branding changed to **Pathweave**. Added an MIT license and configuration, migration, runtime-control, telemetry, reconciliation, and live-validation docs.
 
-## Validation
+## Validation performed
 
-Local unit/integration tests simulate controller congestion and recovery, stale observations, rate bounds, GUID/index changes, unknown/duplicate aliases, atomic rate application and rollback, AQM transient/persistent behavior, shaped TCP half-close, DRR fairness, and existing TCP/UDP behavior. No remote speed test or live interface benchmark is required for these tests.
+- Host tests cover adaptive stability/recovery, unknown capacity, TOML validation/migration, CLI-over-TOML precedence, throughput-history bounds, address/gateway refresh semantics, GUID/index reconciliation, atomic rate updates/rollback, UDP AQM, DRR, and TCP/UDP regressions.
+- `--telemetry-once` ran on this Windows host and returned populated Wi-Fi addresses and default gateway from the native IP Helper tables.
+- Current adapter inventory: Wi-Fi is active at index 8; no Android USB tether/Remote NDIS adapter is present. No controlled remote test endpoint was supplied, so physical Wi-Fi/USB egress, combined-path, interruption/reconnect, and CPU comparisons were not run.
 
-Performance overhead has not been benchmarked on live Wi-Fi/USB paths. The adaptive controller and identity reconciler use one periodic Tokio task each; they sample snapshots every few seconds and do not create per-flow timers.
+## Still open
 
-## Remaining M2.6 gaps
+- Full transactional TOML runtime reload is not implemented. The runtime API changes per-interface rates only; mode, aggregate rates, weights, queue bounds, adaptive settings, AQM, and probes are startup settings.
+- Native IP Helper change notifications are not wired; reconciliation polls fresh tables. Startup does not yet retain configured-but-absent GUID entries as offline slots.
+- Probe duration remains TCP connect-establishment time, not pure RTT. There is no baseline/loaded latency signal, active capacity calibration, or throughput-based capacity learning.
+- The CoDel-inspired UDP path is not full CoDel/FQ-CoDel and currently consumes token budget before its AQM drop decision.
+- QoS memory permits do not bound pre-existing unbounded internal channels in the vendored TCP stack.
+- Live WAN throughput and CPU/memory overhead results remain unmeasured. These gaps prevent marking M2.6 fully closed.
 
-- There is no TOML file schema, migration tool, file reload, or durable policy history. The runtime API currently changes per-interface rates only; aggregate limits, mode, weights, queue/memory limits, burst, adaptive parameters, and AQM parameters remain startup settings.
-- Adaptive capacity sources are explicit user values only. Historical throughput and optional controlled measurements are not implemented. Congestion control does not use loaded-vs-idle latency, jitter, or probe loss; the existing TCP connect probe is not treated as pure RTT.
-- Interface operational status and GUID/index/LUID are reconciled, but address/gateway changes and adapter replacement metadata beyond GUID are not tracked. Existing sockets remain pinned and can fail if their path disappears.
-- CoDel-inspired logic is not full CoDel/FQ-CoDel and currently charges token budget before a UDP AQM drop decision.
-- QoS memory permits still do not cap pre-existing unbounded channels in the vendored TCP stack.
-- No live Wintun, tethered WAN, throughput, or CPU-overhead benchmark was run in this implementation pass.
+## Next milestone
+
+Finish full runtime policy reload and offline adapter startup/recovery, then run bounded Wi-Fi and USB tether validation with Packet Monitor and a controlled endpoint. Begin M3/WFP only after those M2.6 closure criteria are met.

@@ -246,6 +246,21 @@ impl ConfigFile {
                 "QoS burst, queue, memory, quantum and AQM durations must be positive".into(),
             );
         }
+        if q.max_flow_queue_kb > q.max_interface_queue_mb.saturating_mul(1024)
+            || q.max_interface_queue_mb > q.global_memory_mb
+        {
+            return Err("QoS queue limits must satisfy flow <= interface <= global memory".into());
+        }
+        if q.enabled
+            && q.mode == QosMode::Fixed
+            && q.aggregate_upload_mbps == 0.0
+            && q.aggregate_download_mbps == 0.0
+            && q.interfaces
+                .values()
+                .all(|i| i.fixed_upload_mbps == 0.0 && i.fixed_download_mbps == 0.0)
+        {
+            return Err("fixed QoS mode requires at least one aggregate or interface limit".into());
+        }
         for (class, weight) in &q.class_weights {
             if !matches!(
                 class.as_str(),
@@ -301,12 +316,21 @@ impl ConfigFile {
                         "interface '{guid}' {direction} min/max must be finite and non-negative"
                     ));
                 }
-                if let (Some(min), Some(max)) = (min, max) {
-                    if min > max {
-                        return Err(format!(
-                            "interface '{guid}' {direction} minimum exceeds maximum"
-                        ));
-                    }
+                if let (Some(min), Some(max)) = (min, max)
+                    && min > max
+                {
+                    return Err(format!(
+                        "interface '{guid}' {direction} minimum exceeds maximum"
+                    ));
+                }
+                let fixed = match direction {
+                    "upload" => interface.fixed_upload_mbps,
+                    _ => interface.fixed_download_mbps,
+                };
+                if max.is_some_and(|max| fixed > max) {
+                    return Err(format!(
+                        "interface '{guid}' fixed {direction} rate exceeds configured maximum"
+                    ));
                 }
                 if max.is_some_and(|max| capacity > 0.0 && max > capacity) {
                     return Err(format!(
@@ -461,5 +485,26 @@ mod tests {
             },
         );
         assert!(config.validate().is_err());
+    }
+
+    #[test]
+    fn migration_creates_backup_and_rewrites_version_atomically() {
+        let path =
+            std::env::temp_dir().join(format!("pathweave-config-{}.toml", std::process::id()));
+        let backup = path.with_extension("toml.bak");
+        let _ = fs::remove_file(&path);
+        let _ = fs::remove_file(&backup);
+        fs::write(&path, "[qos]\nenabled=false\nmode='disabled'\n").unwrap();
+        migrate_file(&path).unwrap();
+        let migrated = ConfigFile::load(&path).unwrap();
+        assert_eq!(migrated.config.schema_version, CURRENT_SCHEMA_VERSION);
+        assert!(backup.exists());
+        assert!(
+            fs::read_to_string(&backup)
+                .unwrap()
+                .contains("enabled=false")
+        );
+        fs::remove_file(path).unwrap();
+        fs::remove_file(backup).unwrap();
     }
 }

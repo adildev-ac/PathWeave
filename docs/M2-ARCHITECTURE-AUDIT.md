@@ -13,7 +13,7 @@
 
 - A shared `FlowScheduler` receives protocol, tuple, and traffic class metadata through the existing transport-engine dispatch boundary.
 - `InterfacePool` remains the source of configured indexes and health eligibility. Windows `GetIfTable2` telemetry is collected independently and published as cloned immutable snapshots.
-- Counter sampling uses monotonic elapsed time and calculates adapter-level receive/send rates. These counters include all host traffic on the adapter, not only Netmerge flows. Flow byte counters remain separate.
+- Counter sampling uses monotonic elapsed time and calculates adapter-level receive/send rates. These counters include all host traffic on the adapter, not only Pathweave flows. Flow byte counters remain separate.
 - Optional per-interface TCP connect-duration probes use the existing interface-bound connect path. They report connection-establishment duration, not pure RTT, and failures do not quarantine an interface.
 - Modes are `round-robin` (default), `weighted`, `adaptive`, and `adaptive-shadow`. Shadow routing always uses round-robin while logging a separate adaptive recommendation.
 - Selection is flow-level. TCP/UDP handlers continue to pin the socket to the selected interface for the lifetime of that flow.

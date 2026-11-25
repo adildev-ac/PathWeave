@@ -21,7 +21,7 @@ use tokio::{
 };
 
 #[derive(Debug, Parser)]
-#[command(about = "Authenticated bounded TCP server for Netmerge soak tests")]
+#[command(about = "Authenticated bounded TCP server for Pathweave soak tests")]
 struct Args {
     /// Bind address. Defaults to loopback; use a VPN or SSH tunnel for remote testing.
     #[arg(long, default_value = "127.0.0.1:47800")]
@@ -49,10 +49,10 @@ async fn main() -> Result<()> {
     if !args.listen.ip().is_loopback() && args.allow_source_ip.is_empty() {
         bail!("non-loopback binding requires at least one --allow-source-ip restriction");
     }
-    let token = std::env::var("NETMERGE_TEST_TOKEN")
-        .context("set NETMERGE_TEST_TOKEN in the environment before starting the test server")?;
+    let token = std::env::var("PATHWEAVE_TEST_TOKEN")
+        .context("set PATHWEAVE_TEST_TOKEN in the environment before starting the test server")?;
     if token.len() < 24 {
-        bail!("NETMERGE_TEST_TOKEN must contain at least 24 characters");
+        bail!("PATHWEAVE_TEST_TOKEN must contain at least 24 characters");
     }
 
     let listener = TcpListener::bind(args.listen).await?;

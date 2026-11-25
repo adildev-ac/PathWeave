@@ -13,14 +13,14 @@ The script starts the test server only on `127.0.0.1`, creates a temporary rando
 
 ## Live TUN test
 
-After deploying the controlled server on a private VPS/VPN endpoint and setting `NETMERGE_TEST_TOKEN`, build release binaries. Run an elevated PowerShell session and choose a byte cap that is acceptable for the metered link:
+After deploying the controlled server on a private VPS/VPN endpoint and setting `PATHWEAVE_TEST_TOKEN`, build release binaries. Run an elevated PowerShell session and choose a byte cap that is acceptable for the metered link:
 
 ```powershell
 cargo build --release --bins
 .\scripts\windows\test-tcp-soak.ps1 -ServerAddress 10.20.0.1:47800 -AllowExternal -Mode duplex -Bytes 1048576 -MaxBytes 2097152
 ```
 
-The script rediscovers active Wi-Fi and Remote NDIS adapters, rejects a conflicting host route, pre-existing `NetmergePrototype`, or existing Packet Monitor session, creates only a destination `/32` route, captures NIC packets, profiles the engine process, and cleans up only its own route, capture, process, and TUN. It snapshots default routes and the pre-existing `net-merge`/`utun8` adapter states and verifies they remain unchanged. Results are written under `target/m1a2`.
+The script rediscovers active Wi-Fi and Remote NDIS adapters, rejects a conflicting host route, pre-existing `Pathweave`, or existing Packet Monitor session, creates only a destination `/32` route, captures NIC packets, profiles the engine process, and cleans up only its own route, capture, process, and TUN. It snapshots default routes and the pre-existing `net-merge`/`utun8` adapter states and verifies they remain unchanged. Results are written under `target/m1a2`.
 
 Long connection tests use `-Mode duplex -DurationSeconds 300 -MaxBytes <explicit-total-budget>`. `-Connections` and `-Concurrency` control session count and overlap. `--rate-bytes-per-sec` caps sending, while `--receive-rate-bytes-per-sec` makes the receiver consume slowly for backpressure tests. The profiler CSV records CPU time, working/private/peak memory, handles, threads, and TCP socket count at one-second intervals. Packet captures are path evidence; use JSON client bytes and remote server counters for throughput, not packet-count sums.
 

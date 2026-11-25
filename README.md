@@ -1,4 +1,4 @@
-# Netmerge engine prototype
+# Pathweave engine prototype
 
 This repository currently contains a Windows-first feasibility prototype for TCP and IPv4 UDP. It uses the real engine path: TUN packets → userspace IP stack → original destination recovery → interface selection → interface-bound transport relay.
 
@@ -38,6 +38,8 @@ Use a controlled remote TCP test host. After the TUN interface appears, add only
 
 The application uses Windows `IP_UNICAST_IF` / `IPV6_UNICAST_IF` on each outbound socket and logs the intercepted source and destination tuple plus selected interface index. It also records the outbound socket endpoints. The logs alone do not prove physical egress; verify it with a packet capture.
 
+M2.6 adaptive QoS and GUID-keyed configuration are available through the versioned TOML file and CLI overrides. Validate a config without starting TUN using `cargo run -- --validate-config --config .\Pathweave.toml`. See [configuration](docs/M26-CONFIGURATION.md), [migration](docs/M26-CONFIGURATION-MIGRATION.md), [runtime control](docs/M26-RUNTIME-RELOAD.md), and the [M2.6 closure status](docs/M26-RESULTS.md). M2.6 is still open pending complete policy reload and live Wi-Fi/USB WAN validation.
+
 To enable the M1B UDP data plane, add `--enable-udp`. It keeps each session pinned to one selected adapter, preserves UDP datagram boundaries, and expires idle sessions. M1B is IPv4-focused; IPv6 UDP is rejected for now. Configuration and limits are in [docs/UDP-CONFIGURATION.md](docs/UDP-CONFIGURATION.md), [docs/UDP-DATA-PLANE.md](docs/UDP-DATA-PLANE.md), and [docs/UDP-SESSION-MANAGEMENT.md](docs/UDP-SESSION-MANAGEMENT.md).
 
 Scheduler examples (weights/capacities use the explicit interface indexes):
@@ -50,7 +52,7 @@ Switch from observation to adaptive assignment only after reviewing the per-flow
 
 ## Milestone 1A.2 test tools
 
-The companion `netmerge-test-server` and `netmerge-test` binaries provide authenticated deterministic upload, download, duplex, and half-close tests with explicit transfer budgets and SHA-256 checks. Build and exercise the local protocol without admin rights or WAN data:
+The companion `pathweave-test-server` and `pathweave-test` binaries provide authenticated deterministic upload, download, duplex, and half-close tests with explicit transfer budgets and SHA-256 checks. Build and exercise the local protocol without admin rights or WAN data:
 
 ```powershell
 cargo build --bins

@@ -5,8 +5,8 @@
 
 ## Implemented
 
-- Independent Tokio `netmerge-test-server` with token authentication, source-IP allow list, connection cap, per-direction transfer limit, session timeout, structured per-connection JSON logs, and Ctrl+C drain.
-- `netmerge-test` client with deterministic payloads, SHA-256 cross-checks, download/upload/duplex/half-close modes, fixed-byte and duration runs, connection/concurrency counts, per-direction rate limiting, JSON results, Ctrl+C cancellation, and mandatory total byte budget. External addresses require `--allow-external`.
+- Independent Tokio `pathweave-test-server` with token authentication, source-IP allow list, connection cap, per-direction transfer limit, session timeout, structured per-connection JSON logs, and Ctrl+C drain.
+- `pathweave-test` client with deterministic payloads, SHA-256 cross-checks, download/upload/duplex/half-close modes, fixed-byte and duration runs, connection/concurrency counts, per-direction rate limiting, JSON results, Ctrl+C cancellation, and mandatory total byte budget. External addresses require `--allow-external`.
 - TCP server/client local integration script and Windows TUN/Packet Monitor runner.
 - Loopback runtime interface health override (`Healthy`, `Degraded`, `Unavailable`, `Recovering`) and scheduler preference/exclusion tests.
 - Flow connection logs now include outbound local and peer socket endpoints for path correlation.

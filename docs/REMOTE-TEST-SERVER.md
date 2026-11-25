@@ -1,17 +1,17 @@
-# Netmerge remote TCP test server
+# Pathweave remote TCP test server
 
-`netmerge-test-server` is a separate Tokio binary. It is not started or linked by the TUN engine. It accepts one bounded test session per TCP connection and logs newline-delimited JSON connection records.
+`pathweave-test-server` is a separate Tokio binary. It is not started or linked by the TUN engine. It accepts one bounded test session per TCP connection and logs newline-delimited JSON connection records.
 
 ## Security and deployment
 
-The server defaults to `127.0.0.1:47800`. A token of at least 24 characters is required through `NETMERGE_TEST_TOKEN`; do not pass the secret on the command line. A non-loopback bind also requires one or more exact `--allow-source-ip` restrictions. Configure a firewall to admit only the test client. The protocol is plain TCP, so run remote tests over a private WireGuard/VPN path; do not expose the port to the public Internet or use the token across an untrusted network. The server is not deployed automatically.
+The server defaults to `127.0.0.1:47800`. A token of at least 24 characters is required through `PATHWEAVE_TEST_TOKEN`; do not pass the secret on the command line. A non-loopback bind also requires one or more exact `--allow-source-ip` restrictions. Configure a firewall to admit only the test client. The protocol is plain TCP, so run remote tests over a private WireGuard/VPN path; do not expose the port to the public Internet or use the token across an untrusted network. The server is not deployed automatically.
 
 On a Linux VPS, install Rust, copy the repository, then:
 
 ```sh
-export NETMERGE_TEST_TOKEN="$(openssl rand -hex 32)"
-cargo build --release --bin netmerge-test-server
-./target/release/netmerge-test-server \
+export PATHWEAVE_TEST_TOKEN="$(openssl rand -hex 32)"
+cargo build --release --bin pathweave-test-server
+./target/release/pathweave-test-server \
   --listen 10.20.0.1:47800 \
   --allow-source-ip 10.20.0.2 \
   --max-connections 16 \
@@ -28,8 +28,8 @@ The server enforces the concurrent connection cap, requested per-direction byte 
 Set the same token in the client environment. A Windows client can run:
 
 ```powershell
-$env:NETMERGE_TEST_TOKEN = '...'
-.\target\release\netmerge-test.exe --server 10.20.0.1:47800 --mode duplex --bytes 1048576 --max-bytes 2097152 --allow-external --output target\duplex.json
+$env:PATHWEAVE_TEST_TOKEN = '...'
+.\target\release\pathweave-test.exe --server 10.20.0.1:47800 --mode duplex --bytes 1048576 --max-bytes 2097152 --allow-external --output target\duplex.json
 ```
 
 `--max-bytes` is mandatory and counts application payload bytes across all flows and directions. `--bytes` is a per-connection fixed amount; `--duration-secs` is an alternative and remains capped by the explicit budget. `--connections` creates that many sessions; `--concurrency` controls how many run at once. `--rate-bytes-per-sec` throttles sending; `--receive-rate-bytes-per-sec` slows the receiving side to exercise backpressure. Ctrl+C cancels the run and closes active sockets. Non-loopback destinations require `--allow-external` in addition to the explicit cap.

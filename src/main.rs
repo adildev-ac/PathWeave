@@ -36,7 +36,10 @@ use tracing::{debug, error, info, warn};
 use transport::{EngineContext, TransportEngine};
 
 #[derive(Debug, Parser)]
-#[command(about = "TUN TCP/UDP interception and physical-interface binding prototype")]
+#[command(
+    name = "pathweave-engine",
+    about = "Pathweave TUN TCP/UDP forwarding and interface selection prototype"
+)]
 struct Args {
     /// Versioned TOML configuration file.
     #[arg(long)]
@@ -894,12 +897,19 @@ async fn main() -> Result<()> {
         None
     };
     let qos_control_task = if let Some(address) = args.qos_control_listen {
+        let token = std::env::var("PATHWEAVE_QOS_CONTROL_TOKEN").context(
+            "--qos-control-listen requires PATHWEAVE_QOS_CONTROL_TOKEN to protect local mutations",
+        )?;
+        if token.len() < 32 {
+            bail!("PATHWEAVE_QOS_CONTROL_TOKEN must contain at least 32 bytes");
+        }
         let listener = qos_control::bind_listener(address).await?;
         info!(%address, "loopback QoS runtime control enabled");
         Some(tokio::spawn(qos_control::run(
             listener,
             qos_policy.clone(),
             interfaces.clone(),
+            Arc::new(token),
         )))
     } else {
         None
@@ -907,7 +917,7 @@ async fn main() -> Result<()> {
 
     let mut tun_config = tun::Configuration::default();
     tun_config
-        .tun_name("NetmergePrototype")
+        .tun_name("Pathweave")
         .address(args.tun_address.as_str())
         .netmask(args.tun_netmask.as_str())
         .mtu(args.mtu)
@@ -1211,13 +1221,12 @@ fn apply_config_overrides(
                 .iter()
                 .find(|(guid, _)| normalize_guid(guid) == normalize_guid(&identity.guid))
                 .map(|(_, value)| value)
+                && setting.enabled
             {
-                if setting.enabled {
-                    args.qos_interface_guid_limit.push(format!(
-                        "{}={}:{}",
-                        identity.guid, setting.fixed_upload_mbps, setting.fixed_download_mbps
-                    ));
-                }
+                args.qos_interface_guid_limit.push(format!(
+                    "{}={}:{}",
+                    identity.guid, setting.fixed_upload_mbps, setting.fixed_download_mbps
+                ));
             }
         }
     }
@@ -1307,7 +1316,7 @@ mod config_tests {
     #[test]
     fn toml_values_are_defaults_and_explicit_cli_values_win() {
         let matches = Args::command()
-            .try_get_matches_from(["netmerge", "--interface", "8", "--qos-upload-mbps", "3"])
+            .try_get_matches_from(["pathweave", "--interface", "8", "--qos-upload-mbps", "3"])
             .unwrap();
         let mut args = Args::from_arg_matches(&matches).unwrap();
         let mut config = config::ConfigFile::default();

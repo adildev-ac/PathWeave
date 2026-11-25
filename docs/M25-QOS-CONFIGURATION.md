@@ -5,7 +5,7 @@ QoS is off by default. Configure it through CLI flags; this increment does not a
 ## Fixed shaping example
 
 ```powershell
-netmerge-engine-prototype.exe --interface 12,34 --enable-udp `
+pathweave-engine.exe --interface 12,34 --enable-udp `
   --qos-mode fixed `
   --qos-upload-mbps 25 --qos-download-mbps 100 `
   --qos-interface-limit 12=15:70 `

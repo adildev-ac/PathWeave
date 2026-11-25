@@ -2,7 +2,7 @@
 
 On Windows, one background collector samples `GetIfTable2` once per second. It records stable adapter GUID, current index, operational status, MTU, media transmit/receive link speeds, cumulative octets, errors, and discards. Link speeds are diagnostic values only and are never used as internet-capacity estimates.
 
-Run `netmerge-engine-prototype --telemetry-once` for a read-only one-time JSON snapshot, without creating the TUN device.
+Run `pathweave-engine --telemetry-once` for a read-only one-time JSON snapshot, without creating the TUN device.
 
 Download/upload rates are counter deltas divided by monotonic elapsed seconds and smoothed with EMA (default alpha 0.35, configurable by CLI). Counter decreases reset the rate baseline. A GUID observed under a new index creates a fresh baseline and the GUID remains visible in diagnostics. OS rates include unrelated host traffic. The existing per-flow byte totals separately represent application traffic handled by this process.
 
