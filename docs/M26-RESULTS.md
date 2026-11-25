@@ -17,7 +17,7 @@
 - `cargo test --workspace`: 50 engine tests and 4 client/server protocol tests passed. `cargo fmt --all -- --check`, Clippy with `-D warnings`, Windows-target check, and release build passed.
 - The bounded local protocol script passed 12 checks, including TCP download/upload/duplex/half-close, concurrent flows, pacing, byte caps, and authentication rejection.
 - `--telemetry-once` ran on this Windows host and returned populated Wi-Fi addresses and default gateway from the native IP Helper tables.
-- Current adapter inventory: Wi-Fi is active at index 8; no Android USB tether/Remote NDIS adapter is present. No controlled remote test endpoint was supplied, so physical Wi-Fi/USB egress, combined-path, interruption/reconnect, and CPU comparisons were not run.
+- Current live validation: Wi-Fi is active at index 8 and Android USB tether is active as Ethernet 2 at index 4. A USB-bound Pathweave HTTPS request passed. Packet Monitor records zero packets from the tether despite a verified component mapping and clean filters; independent `netsh trace` captured the ordinary USB-bound TCP handshake on NDIS interface 4. See [M2.6 live validation](M26-LIVE-VALIDATION.md) for the isolated capture findings. Wi-Fi-only Pathweave, combined-path distribution, interruption/reconnect, and CPU comparisons remain unverified.
 
 ## Still open
 
